@@ -23,6 +23,14 @@ test('labels at the image edge remain inside the image', () => {
   assert.ok(label.x + label.width <= canvas.width);
   assert.ok(label.y + label.height <= result.height);
 });
+test('a blocked right-side label falls back to automatic placement', () => {
+  const target = { rect: { x: 100, y: 100, width: 60, height: 40 }, label: 'Date range' };
+  const blocker = { rect: { x: 170, y: 100, width: 100, height: 40 } };
+  const normal = layoutAnnotations(geometry([target, blocker]), canvas, measure);
+  const preferred = layoutAnnotations(geometry([{ ...target, labelPlacement: 'right' }, blocker]), canvas, measure);
+  assert.deepEqual(preferred, normal);
+  assert.ok(preferred.items[0].label.y + preferred.items[0].label.height < target.rect.y);
+});
 test('crowded crops use a separate numbered legend instead of overlapping labels', () => {
   const result = layoutAnnotations({ region: { x: 100, y: 200, width: 100, height: 30 }, highlights: [
     { rect: { x: 100, y: 200, width: 50, height: 30 }, label: 'First very long annotation' },

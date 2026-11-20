@@ -2,6 +2,56 @@
 
 [Back to the README](../README.md)
 
+## Browser capture workflows
+
+Choose the capture method you prefer. A request for the current task takes precedence over a standing preference such as “Always use the Chrome extension for Repro captures.” If your preferred method is unavailable, the agent explains why and asks before switching. With no preference, use the current browser’s built-in capture when it can save the requested media to files Repro can access. Otherwise, use the Chrome extension. For the extension workflow, open the page in Chrome and follow its capture approval flow.
+
+### Saved browser captures
+
+`capture_annotate` and `capture_export` process local files. Install the Node dependencies and start the local service through the managed installer or `npm run setup` followed by `npm start`. Follow the installer’s Chrome extension steps when using the extension workflow. Existing installations need `npm run service:restart` after updating the server. Reconnect the MCP client to discover the additional tools.
+
+Use your browser to save a screenshot or recording and measure the crop and annotation targets in CSS pixels. Keep the viewport size fixed during recording. For example, in T3 Code, use `preview_snapshot` with `save: true` for screenshots and `preview_recording_start` and `preview_recording_stop` for recordings. Use `preview_evaluate` to read target elements’ `getBoundingClientRect()` values and `innerWidth`/`innerHeight`.
+
+If your browser provides a recording start timestamp and JavaScript evaluation, call `capture_browser_script` with that `startedAt` for optional input timestamps. Evaluate its `installExpression` in the controlled tab before interacting. Before stopping, evaluate its `readExpression` and pass the returned `events` and `viewport` to `capture_export`, then evaluate `cleanupExpression`. The observer adds no visible page elements, never stores field values or ordinary typed text, and observes only the top-level document. Read events before navigating because navigation removes the observer. It keeps up to 2,000 input events per installation. For a callout, read `(Date.now() - Date.parse(startedAt)) / 1000` together with the target rectangles to capture its source timestamp.
+
+Annotate a saved screenshot:
+
+```json
+{
+  "imagePath": "/absolute/path/to/screenshot.png",
+  "viewport": { "width": 1280, "height": 800 },
+  "highlight": [
+    { "target": { "x": 200, "y": 300, "width": 250, "height": 60 }, "label": "Saved result", "style": "box", "labelPlacement": "right" }
+  ]
+}
+```
+
+Pass that object to `capture_annotate`. Add an optional `region` rectangle to crop. Targets and regions use viewport CSS pixels. Supply `viewport` for captures taken at a higher display scale, and Repro preserves the source pixel density. Without it, coordinates use source image pixels. Labels wrap and move into a numbered legend when the crop is crowded. `style` supports `box` and `arrow`.
+
+Measure the visible card or control itself with `getBoundingClientRect()`. For text in a full-width container, measure the text range with `Range.getBoundingClientRect()`. Use a tight rectangle that encloses the complete target. Add `labelPlacement: "right"` to place a label beside the target when the space above contains evidence. If the right-side position is outside the crop or overlaps another highlight or label, Repro uses automatic placement, including the numbered legend when needed.
+
+Export a recorded interaction:
+
+```json
+{
+  "videoPath": "/absolute/path/to/recording.mp4",
+  "viewport": { "width": 1280, "height": 800 },
+  "preserveTiming": false,
+  "events": [{ "t": 1.2, "type": "click", "x": 240, "y": 320 }],
+  "callouts": [{
+    "at": 2.5,
+    "holdSeconds": 3,
+    "highlight": [{ "target": { "x": 200, "y": 300, "width": 250, "height": 60 }, "label": "Saved result" }]
+  }]
+}
+```
+
+Pass that object to `capture_export`. Each callout extracts its frame from the video, annotates it, and inserts a reading pause without removing the following action. Timestamps are source-video seconds, before trimming or inserted pauses. Use the browser observer or record actual action timings relative to the recording start; do not invent interaction times. Optional `keydown` events with `keyLabel` produce shortcut badges; do not record ordinary typed text. Supplied click coordinates produce red rings. Rings remain visible for 0.45 seconds. The exporter uses the supplied event log; it does not observe the browser itself.
+
+Visual sampling automatically identifies activity and trims idle gaps. `preserveTiming: true` keeps the complete source timeline, with requested editorial pauses added. The export preserves the crop's native pixel density and returns the MP4, an unchanged copy of the original video, callout PNGs, and a manifest describing source and output timing. Imported recordings support up to 180 seconds and 20 callouts. Output is silent and regions stay fixed. Use screenshots for very tight crops with large legends because video callout images are fitted into the video's frame size.
+
+The same operations are available through `npm run capture -- annotate '{...}'` and `npm run capture -- export '{...}'` when an existing conversation has cached the old MCP tool list.
+
 ## Installation notes
 
 The managed installer is macOS-only. It registers an authenticated HTTP MCP endpoint in your Codex user configuration and a per-user LaunchAgent that starts the local service at login and restarts it after a crash. No terminal needs to stay open.

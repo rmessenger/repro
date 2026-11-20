@@ -29,7 +29,7 @@ test('HTTP MCP initializes without Chrome and advertises evidence tools and acti
   assert.match(client.getInstructions(), /Extension not connected at initialization/);
   assert.match(client.getInstructions(), /Load unpacked/);
   const { tools } = await client.listTools();
-  assert.equal(tools.length, 7);
+  assert.equal(tools.length, 10);
   assert.match(tools.find(t => t.name === 'capture_start').description, /UAT/);
   const result = await client.callTool({ name: 'capture_status', arguments: {} });
   const status = JSON.parse(result.content[0].text);

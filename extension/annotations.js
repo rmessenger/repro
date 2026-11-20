@@ -28,15 +28,20 @@ export function layoutAnnotations(geometry, canvas, measure) {
     return { index: index + 1, style: h.style, text: h.label, rect: { x, y, width: right - x, height: bottom - y } };
   });
   const placed = []; let footer = canvas.height;
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
     if (!item.text) continue;
     const maxWidth = Math.max(1, Math.min(300, canvas.width - 24));
     let lines = wrap(item.text, maxWidth, measure);
     let width = Math.min(canvas.width, Math.max(...lines.map(measure)) + 12), height = lines.length * lineHeight + 8;
     const r = item.rect;
-    const xs = [clamp(r.x, 0, canvas.width - width), clamp(r.x + r.width - width, 0, canvas.width - width), clamp(r.x - width - gap, 0, canvas.width - width), clamp(r.x + r.width + gap, 0, canvas.width - width)];
+    const rightX = r.x + r.width + gap;
+    const xs = [clamp(r.x, 0, canvas.width - width), clamp(r.x + r.width - width, 0, canvas.width - width), clamp(r.x - width - gap, 0, canvas.width - width), clamp(rightX, 0, canvas.width - width)];
     const ys = [r.y - height - gap, r.y + r.height + gap, r.y];
     const candidates = xs.flatMap(x => ys.map(y => ({ x, y, width, height })));
+    if (geometry.highlights[index].labelPlacement === 'right' && rightX + width <= canvas.width) {
+      const y = clamp(r.y + (r.height - height) / 2, 0, canvas.height - height);
+      candidates.unshift({ x: rightX, y, width, height });
+    }
     const position = candidates.find(candidate => candidate.y >= 0 && candidate.y + height <= canvas.height && !items.some(other => overlaps(candidate, other.rect, 4)) && !placed.some(other => overlaps(candidate, other, gap)));
     if (position) {
       item.label = { ...position, lines, footer: false };
@@ -51,7 +56,7 @@ export function layoutAnnotations(geometry, canvas, measure) {
   return { items, height: footer > canvas.height ? footer + gap : canvas.height };
 }
 
-export function drawAnnotations(ctx, layout) {
+export function drawAnnotations(ctx, layout, canvasWidth = ctx.canvas.width) {
   ctx.save();
   ctx.strokeStyle = '#ef233c'; ctx.fillStyle = '#ef233c'; ctx.lineWidth = 3;
   for (const item of layout.items) {
@@ -77,7 +82,7 @@ export function drawAnnotations(ctx, layout) {
     ctx.fillStyle = '#fff';
     label.lines.forEach((line, i) => ctx.fillText(line, label.x + 6, label.y + 4 + i * lineHeight));
     if (label.footer) {
-      const x = clamp(item.rect.x, 0, Math.max(0, ctx.canvas.width - 24)), y = Math.max(0, item.rect.y - 23);
+      const x = clamp(item.rect.x, 0, Math.max(0, canvasWidth - 24)), y = Math.max(0, item.rect.y - 23);
       ctx.fillStyle = '#c91232'; ctx.fillRect(x, y, 24, 22);
       ctx.fillStyle = '#fff'; ctx.fillText(String(item.index), x + 5, y + 3);
     }

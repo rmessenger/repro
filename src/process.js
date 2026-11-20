@@ -18,9 +18,9 @@ export function run(binary, args) {
     child.on('close', code => code === 0 ? resolve(stdout) : reject(new Error(`${binary} exited ${code}: ${stderr}`)));
   });
 }
-export async function processVideo(directory, metadata, { calloutRoot = path.dirname(directory) } = {}) {
+export async function processVideo(directory, metadata, { calloutRoot = path.dirname(directory), inputPath = path.join(directory, 'original.webm'), originalPath = inputPath, keyboardFrame } = {}) {
   metadata = selectCursorSource(metadata);
-  const raw = path.join(directory, 'original.webm');
+  const raw = inputPath;
   const probe = JSON.parse(await run('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', raw]));
   const stream = probe.streams.find(s => s.codec_type === 'video');
   const probed = Number(probe.format.duration);
@@ -45,10 +45,19 @@ export async function processVideo(directory, metadata, { calloutRoot = path.dir
     await copyFile(path.join(imageDirectory, 'screenshot.png'), image);
     args.push('-loop', '1', '-framerate', String(frameRate), '-i', image);
   }
-  const keyboard = planKeyboardBadges(metadata.events, playback, stream);
+  const keyboard = planKeyboardBadges(metadata.events, playback, keyboardFrame ?? stream);
+  const { scaleX, scaleY } = keyboardFrame ?? { scaleX: 1, scaleY: 1 };
+  const even = pixels => Math.ceil(Math.round(pixels) / 2) * 2;
+  const video = {
+    width: Math.max(stream.width, even(keyboard.width * scaleX)),
+    height: Math.max(stream.height, even(keyboard.height * scaleY)),
+  };
   for (const [index, badge] of keyboard.badges.entries()) {
     const file = path.join(directory, `keys-${index + 1}.png`);
-    await sharp(Buffer.from(keyboardBadgeSvg(badge))).png().toFile(file);
+    const density = Math.ceil(72 * Math.max(1, scaleX, scaleY));
+    await sharp(Buffer.from(keyboardBadgeSvg(badge)), { density })
+      .resize(Math.max(1, Math.round(badge.width * scaleX)), Math.max(1, Math.round(badge.height * scaleY)), { fit: 'fill' })
+      .png().toFile(file);
     args.push('-loop', '1', '-framerate', String(frameRate), '-i', file);
   }
   const editImages = [];
@@ -93,8 +102,10 @@ export async function processVideo(directory, metadata, { calloutRoot = path.dir
     filters.push(`[ringbase][${cursorInput}:v]overlay=x='${expressions.x}':y='${expressions.y}':eval=frame:format=auto:shortest=1[cursorvideo]`);
     cursorBase = 'cursorvideo';
   }
-  filters.push(`[${cursorBase}]tpad=stop_mode=clone:stop_duration=${keyboardTailSeconds},pad=${keyboard.width}:${keyboard.height}:(ow-iw)/2:0:color=white[keybase0]`);
-  keyboard.badges.forEach((badge, index) => filters.push(`[keybase${index}][${callouts.length + index + 1}:v]overlay=x=W-w-8:y=H-h-8:shortest=1:enable='gte(t,${badge.start})*lt(t,${badge.end})'[keybase${index + 1}]`));
+  // concat drops the frame rate, which tpad needs to extend the final frame.
+  const tailRate = keyboardTailSeconds ? `fps=${cursor.enabled ? cursorFrameRate : frameRate},` : '';
+  filters.push(`[${cursorBase}]${tailRate}tpad=stop_mode=clone:stop_duration=${keyboardTailSeconds},pad=${video.width}:${video.height}:(ow-iw)/2:0:color=white[keybase0]`);
+  keyboard.badges.forEach((badge, index) => filters.push(`[keybase${index}][${callouts.length + index + 1}:v]overlay=x=W-w-${8 * scaleX}:y=H-h-${8 * scaleY}:shortest=1:enable='gte(t,${badge.start})*lt(t,${badge.end})'[keybase${index + 1}]`));
   filters.push(`[keybase${keyboard.badges.length}]format=yuv420p[final]`);
   const output = path.join(directory, 'clip.mp4');
   const filterFile = path.join(directory, 'export-filters.txt');
@@ -107,7 +118,7 @@ export async function processVideo(directory, metadata, { calloutRoot = path.dir
   const warnings = [...(metadata.warnings || []), ...editing.warnings, ...cursorTiming.warnings];
   const outputDurationSeconds = Number(await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', output]));
   const cursorHoldSeconds = playback.filter(segment => segment.type === 'cursorHold').reduce((sum, segment) => sum + segment.frames / frameRate, 0);
-  const manifest = { ...metadata, duration, timeline, playback, cursor: { ...cursor, holds: cursorTiming.holds }, cursorHoldSeconds, editing, warnings, automaticHoldSeconds, keyboard, keyboardTailSeconds, keptSeconds, insertedSeconds, outputDurationSeconds, omittedSeconds: duration - keptSeconds, sourceVideo: { width: stream.width, height: stream.height }, video: { width: keyboard.width, height: keyboard.height }, original: raw, clip: output };
+  const manifest = { ...metadata, duration, timeline, playback, cursor: { ...cursor, holds: cursorTiming.holds }, cursorHoldSeconds, editing, warnings, automaticHoldSeconds, keyboard, keyboardTailSeconds, keptSeconds, insertedSeconds, outputDurationSeconds, omittedSeconds: duration - keptSeconds, sourceVideo: { width: stream.width, height: stream.height }, video, original: originalPath, clip: output };
   await writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest, null, 2));
-  return { clip: output, original: raw, manifest: path.join(directory, 'manifest.json'), durationSeconds: duration, keptSeconds, insertedSeconds, outputDurationSeconds, calloutCount: callouts.length, keyboardTailSeconds, omittedSeconds: duration - keptSeconds, clickCount: metadata.events.filter(e => ['pointerdown', 'click'].includes(e.type)).length, automaticHoldSeconds, cursorHoldSeconds, warnings };
+  return { clip: output, original: originalPath, manifest: path.join(directory, 'manifest.json'), durationSeconds: duration, keptSeconds, insertedSeconds, outputDurationSeconds, calloutCount: callouts.length, keyboardTailSeconds, omittedSeconds: duration - keptSeconds, clickCount: metadata.events.filter(e => ['pointerdown', 'click'].includes(e.type)).length, automaticHoldSeconds, cursorHoldSeconds, warnings };
 }

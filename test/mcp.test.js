@@ -9,7 +9,7 @@ test('MCP handshake advertises compact capture tools and validated inputs', asyn
   await client.connect(transport);
   try {
     const result = await client.listTools();
-    assert.deepEqual(result.tools.map(tool => tool.name).sort(), ['capture_callout', 'capture_release', 'capture_screenshot', 'capture_start', 'capture_status', 'capture_stop', 'capture_wait']);
+    assert.deepEqual(result.tools.map(tool => tool.name).sort(), ['capture_annotate', 'capture_browser_script', 'capture_callout', 'capture_export', 'capture_release', 'capture_screenshot', 'capture_start', 'capture_status', 'capture_stop', 'capture_wait']);
     const invalid = await client.callTool({ name: 'capture_start', arguments: { maxSeconds: -1 } });
     assert.equal(invalid.isError, true);
   } finally { await client.close(); }

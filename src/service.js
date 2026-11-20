@@ -8,6 +8,8 @@ import { createMcpServer, version } from './mcp-tools.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { schemas } from './schema.js';
 import { processVideo } from './process.js';
+import { annotateFile, exportFile } from './files.js';
+import { browserScript } from './browser-events.js';
 export async function createCaptureService(settings, { artifactDirectory = artifacts } = {}) {
 await mkdir(artifactDirectory, { recursive: true });
 const extensionPath = path.join(root, 'dist/extension');
@@ -17,7 +19,7 @@ const installation = {
   troubleshooting: 'After a service restart, allow a few seconds for automatic reconnection before asking the user to reload anything. If already installed, check that Repro is enabled and reload it in chrome://extensions. Connection status cannot distinguish an uninstalled extension from closed Chrome, a disabled extension, or a connection failure.',
   agentAction: 'Walk the user through these steps. Do not try to install the extension or approve capture on their behalf. Once connected, retry capture_status, then request a tab through capture_start.',
 };
-const readiness = () => ({ service: 'repro', version, extensionConnected: extension?.readyState === 1, extensionVersion, extensionPath });
+const readiness = () => ({ service: 'repro', version, fileToolsReady: true, extensionConnected: extension?.readyState === 1, extensionVersion, extensionPath });
 let extensionVersion;
 let extension;
 const pending = new Map();
@@ -34,6 +36,9 @@ async function body(request, limit) {
   return Buffer.concat(chunks);
 }
 function command(name, args) {
+  if (name === 'browser_script') return browserScript(args);
+  if (name === 'annotate') return annotateFile(args, artifactDirectory);
+  if (name === 'export') return exportFile(args, artifactDirectory);
   if (!extension || extension.readyState !== 1) {
     const result = { ...readiness(), ready: false, reason: 'extension_not_connected', installation };
     if (name === 'status') return result;
@@ -60,8 +65,8 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname === '/mcp') {
       if (request.headers.origin) return reply(response, 403, { error: 'MCP accepts local agent clients, not browser pages.' });
       if (request.method !== 'POST') { response.setHeader('Allow', 'POST'); return reply(response, 405, { error: 'Use MCP POST requests.' }); }
-      const payload = JSON.parse((await body(request, 128000)).toString());
-      const mcp = createMcpServer(command, extension?.readyState === 1 ? '' : `Extension not connected at initialization. ${installation.troubleshooting} Help the user: ${installation.steps.join(' ')}`);
+      const payload = JSON.parse((await body(request, 1024 * 1024)).toString());
+      const mcp = createMcpServer(command, extension?.readyState === 1 ? '' : `Extension not connected at initialization. File tools capture_browser_script, capture_annotate, and capture_export remain available. For Chrome capture tools only: ${installation.troubleshooting} Help the user: ${installation.steps.join(' ')}`);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       const finished = new Promise(resolve => response.once('close', resolve));
       try {
@@ -72,7 +77,7 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     if (url.pathname === '/command' && request.method === 'POST') {
-      const data = JSON.parse((await body(request, 32000)).toString());
+      const data = JSON.parse((await body(request, 1024 * 1024)).toString());
       if (!Object.hasOwn(schemas, data.command)) return reply(response, 400, { error: 'Unknown command.' });
       const args = schemas[data.command].parse(data.args || {});
       return reply(response, 200, await command(data.command, args));
