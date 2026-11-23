@@ -145,3 +145,36 @@ test('field changes keep typed frames, click arrivals, and editing highlights in
   assert.ok(pixel(38, 95).every(channel => channel > 200), 'The previous field highlight does not reappear');
   assert.ok(pixel(178, 95)[0] > 150 && pixel(178, 95)[1] < 130, 'The new field is highlighted on its first changed frame');
 });
+
+test('cursor export retains both sides of a foreground reload and stays off the unverified gap', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'repro-cursor-reload-'));
+  const original = path.join(directory, 'original.webm');
+  await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=white:s=320x240:r=15:d=5', '-c:v', 'libvpx-vp9', original]);
+  const pointerSamples = [{ t: 1, x: 65, y: 75 }, { t: 2.3, x: 160, y: 120 }, { t: 3.5, x: 245, y: 150 }]
+    .map(click => ({ ...click, type: 'pointerdown', tabActive: true }));
+  const result = await processVideo(directory, {
+    duration: 5, captureStartedAt: 10000, samples: [], events: pointerSamples, pointerSamples, preserveTiming: true,
+    animateCursor: true, cursorSuppression: { requested: false, safeForAnimation: false },
+    cursorCoverage: { source: 'tab', knownOverlay: true, spans: [
+      { from: 9700, through: 12000, points: [[11000, 65, 75, 1]] },
+      { from: 12900, through: 15100, points: [[13500, 245, 150, 1]] },
+    ] },
+    geometry: { tabActive: true, region: { x: 0, y: 0, width: 320, height: 240 } },
+  });
+  const { cursor, cursorSource } = JSON.parse(await readFile(result.manifest, 'utf8'));
+  assert.equal(cursorSource.foregroundSamples, 2);
+  assert.equal(cursorSource.ringOnlyClicks, 1);
+  assert.equal(cursor.clicks.length, 3);
+  assert.equal(cursorAt(cursor, 2.4), null);
+  const png = path.join(directory, 'cursor.png');
+  const grab = async (t, x, y) => {
+    await run('ffmpeg', ['-y', '-v', 'error', '-ss', String(t), '-i', result.clip, '-frames:v', '1', png]);
+    const pixels = await sharp(png).removeAlpha().raw().toBuffer();
+    const i = ((y + 7) * 320 + x + 4) * 3;
+    return [...pixels.subarray(i, i + 3)];
+  };
+  assert.ok((await grab(1.1, 65, 75))[0] < 100);
+  assert.ok((await grab(2.4, 65, 75)).every(channel => channel > 220));
+  assert.ok((await grab(2.4, 160, 120)).every(channel => channel > 220));
+  assert.ok((await grab(3.6, 245, 150))[0] < 100);
+});

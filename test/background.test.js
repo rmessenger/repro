@@ -30,7 +30,7 @@ globalThis.chrome = {
   action: { onClicked: event('clicked'), setBadgeText: async ({ tabId, text }) => badges.set(tabId, text), setBadgeBackgroundColor: async () => {}, setTitle: async ({ tabId, title }) => titles.set(tabId, title) },
   scripting: { executeScript: async options => {
     effects.push({ type: options.func?.name || 'inject', tabId: options.target.tabId, visible: options.args?.[1] });
-    return [{ result: { shown: options.args?.[1] === true } }];
+    return [{ documentId: 'current-document', result: { shown: options.args?.[1] === true } }];
   } },
   tabCapture: { getMediaStreamId: async ({ targetTabId }) => { effects.push({ type: 'stream', tabId: targetTabId }); return `stream-${targetTabId}`; } },
 };
@@ -78,6 +78,8 @@ test('two agents queue approval, retain separate routes, and release independent
     { destination: 'offscreen', type: 'tabActivity', sessionId: 'a', active: false },
     { destination: 'offscreen', type: 'tabActivity', sessionId: 'b', active: true },
   ]);
+  await listeners.updated(2, { status: 'complete' });
+  assert.deepEqual(forwarded.at(-1), { destination: 'offscreen', type: 'cursorNewDocument', sessionId: 'b', documentId: 'current-document' });
   await send('released', { sessionId: 'a' });
   assert.equal(badges.get(1), ''); assert.equal(badges.get(2), 'ON');
   assert.deepEqual(await send('resolve', { sessionId: 'b' }), { tabId: 2, tabActive: true });

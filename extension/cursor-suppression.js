@@ -29,6 +29,22 @@
     if (current.points.length >= 20000) { current.positionsValid = false; return; }
     current.points.push(point);
   }
+  function coverage() {
+    if (!current?.captureId || !current.from || !current.through) return;
+    return { captureId: current.captureId, from: current.from, through: current.through, points: current.points.slice(current.sentPoints) };
+  }
+  async function publish() {
+    const chunk = coverage();
+    if (!chunk) return;
+    current.sentPoints = current.points.length;
+    current.publishedAt = Date.now();
+    try {
+      const response = await chrome.runtime.sendMessage({ destination: 'background', type: 'cursorChunk', chunk });
+      if (response?.error) throw new Error(response.error);
+    } catch (error) {
+      if (!/Extension context invalidated|Receiving end does not exist|message port closed/i.test(error.message)) throw error;
+    }
+  }
   function recordPoses(found) {
     if (!current.probePositions) return;
     const entry = { at: Date.now(), visibility: document.visibilityState, cursors: found.cursors.map(cursorGeometry) };
@@ -47,12 +63,18 @@
   function sync(reason) {
     if (!current) return;
     if (runtimeId && chrome.runtime.id !== runtimeId) { cleanup(); return; }
-    if (!current.positionsValid) return;
+    if (!current.positionsValid || (current.captureId && current.lost && current.supported)) return;
     const found = snapshot();
+    if (current.captureId && !current.supported) {
+      if (!found.cursors.length) return;
+      current.supported = true;
+      current.lost = false;
+    }
     recordPoints(found);
     if (!current.positionsValid) {
       current.lost ||= current.verified;
       current.verified = false;
+      publish();
       stopWatching();
       record('unreadable-position', found);
       return;
@@ -60,6 +82,7 @@
     if (!found.root || !found.cursors.length) {
       current.verified = false;
       current.lost = true;
+      if (current.captureId) { publish(); stopWatching(); }
       record(reason, found);
       return;
     }
@@ -78,10 +101,20 @@
     }
     current.verified = found.cursors.every(e => getComputedStyle(e).display === 'none');
     if (!current.verified) current.lost = true;
+    if (current.captureId) {
+      if (current.lost) {
+        publish();
+        stopWatching();
+      } else {
+        current.from ??= Date.now();
+        current.through = Date.now();
+        if (current.through - current.publishedAt >= 250) publish();
+      }
+    }
     record(reason, found);
   }
   function report() {
-    return current ? { requested: true, supported: current.supported, verified: current.verified, safeForAnimation: current.supported && current.verified && !current.lost, lost: current.lost, rootCount: current.roots.size, observations: [...current.observations], ...(current.trackPositions ? { tracking: { source: 'codex-overlay', valid: current.positionsValid, points: [...current.points] } } : {}), ...(current.probePositions ? { poses: [...current.poses], posesTruncated: current.posesTruncated, initialLayout: current.initialLayout } : {}) } : { requested: false, safeForAnimation: false };
+    return current ? { requested: true, supported: current.supported, verified: current.verified, safeForAnimation: current.supported && current.verified && !current.lost, lost: current.lost, rootCount: current.roots.size, from: current.from, observations: [...current.observations], ...(current.trackPositions ? { tracking: { source: 'codex-overlay', valid: current.positionsValid, points: [...current.points] } } : {}), ...(current.probePositions ? { poses: [...current.poses], posesTruncated: current.posesTruncated, initialLayout: current.initialLayout } : {}) } : { requested: false, safeForAnimation: false };
   }
   function stopWatching() {
     current.observer?.disconnect();
@@ -102,12 +135,13 @@
     try { sync('stop'); return report(); }
     finally { cleanup(); }
   }
-  function start(probePositions = false, trackPositions = false) {
+  function start(probePositions = false, trackPositions = false, captureId) {
+    if (captureId && captureId === current?.captureId) return report();
     stop();
     const found = snapshot();
     const supported = Boolean(found.root && found.cursors.length);
-    current = { supported, verified: false, lost: !supported, roots: new Map(), observations: [], probePositions, poses: [], posesTruncated: false, trackPositions, positionsValid: supported, points: [] };
-    if (!supported) { record('unsupported', found); return report(); }
+    current = { supported, verified: false, lost: !supported, roots: new Map(), observations: [], probePositions, poses: [], posesTruncated: false, trackPositions, positionsValid: supported || Boolean(captureId), points: [], captureId, sentPoints: 0, publishedAt: 0 };
+    if (!supported && !captureId) { record('unsupported', found); return report(); }
     if (probePositions) {
       current.initialLayout = found.cursors.map(cursor => {
         const ancestors = [];
@@ -125,12 +159,20 @@
     return report();
   }
   globalThis.__reproCursorSuppression = { start, stop, report };
-  addEventListener('pagehide', cleanup);
+  addEventListener('pagehide', () => {
+    if (current?.captureId) publish();
+    cleanup();
+  });
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     if (message.type !== 'cursorControl') return;
     try {
-      if (message.operation === 'start') respond(start(message.probePositions === true, message.trackPositions === true));
-      else if (message.operation === 'stop') respond(stop());
+      if (message.operation === 'start') respond(start(message.probePositions === true, message.trackPositions === true, message.captureId));
+      else if (message.operation === 'stop') {
+        if (message.captureId && current?.captureId !== message.captureId) { respond({ requested: false, safeForAnimation: false }); return; }
+        sync('status');
+        const chunk = coverage();
+        respond({ ...stop(), chunk });
+      }
       else { sync('status'); respond(report()); }
     } catch (error) { respond({ error: error.message }); }
   });

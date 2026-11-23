@@ -5,7 +5,8 @@ import { readFile } from 'node:fs/promises';
 const source = await readFile(new URL('../extension/cursor-suppression.js', import.meta.url), 'utf8');
 function fixture({ supported = true, blockedStyle = false } = {}) {
   const document = new EventTarget();
-  const observers = [];
+  const observers = [], messages = [], pageListeners = {};
+  let mounted = supported;
   const cursor = () => ({ style: { opacity: '1', transform: 'translate3d(100px, 200px, 0px)' }, getBoundingClientRect: () => ({ x: 100, y: 200, width: 24, height: 24 }) });
   const host = cursor();
   const makeRoot = () => ({
@@ -17,11 +18,11 @@ function fixture({ supported = true, blockedStyle = false } = {}) {
   const original = root;
   document.documentElement = {};
   document.visibilityState = 'visible';
-  document.getElementById = () => supported ? host : null;
+  document.getElementById = () => mounted ? host : null;
   document.createElement = () => ({ textContent: '', parentNode: null, remove() { this.parentNode.styles.splice(this.parentNode.styles.indexOf(this), 1); this.parentNode = null; } });
-  const context = vm.createContext({ document, Date, Map, JSON, Boolean, addEventListener() {}, setInterval: () => 1, clearInterval() {}, chrome: { dom: { openOrClosedShadowRoot: () => root }, runtime: { id: 'test-extension', onMessage: { addListener() {} } } }, MutationObserver: class { constructor(callback) { this.callback = callback; observers.push(this); } observe() {} disconnect() { this.disconnected = true; } }, getComputedStyle: element => ({ display: !blockedStyle && root.styles.length ? 'none' : 'block', transform: element.style.transform, opacity: element.style.opacity, width: '24px', height: '24px', left: '0px', top: '0px' }) });
+  const context = vm.createContext({ document, Date, Map, JSON, Boolean, addEventListener(type, callback) { pageListeners[type] = callback; }, setInterval: () => 1, clearInterval() {}, chrome: { dom: { openOrClosedShadowRoot: () => root }, runtime: { id: 'test-extension', sendMessage: async message => { messages.push(message); }, onMessage: { addListener() {} } } }, MutationObserver: class { constructor(callback) { this.callback = callback; observers.push(this); } observe() {} disconnect() { this.disconnected = true; } }, getComputedStyle: element => ({ display: !blockedStyle && root.styles.length ? 'none' : 'block', transform: element.style.transform, opacity: element.style.opacity, width: '24px', height: '24px', left: '0px', top: '0px' }) });
   vm.runInContext(source, context);
-  return { context, control: context.__reproCursorSuppression, document, original, observers, get root() { return root; }, replaceRoot: () => { root = makeRoot(); }, replaceCursor: () => { root.cursors = [cursor()]; } };
+  return { context, messages, pageListeners, mount: () => { mounted = true; }, control: context.__reproCursorSuppression, document, original, observers, get root() { return root; }, replaceRoot: () => { root = makeRoot(); }, replaceCursor: () => { root.cursors = [cursor()]; } };
 }
 test('extension suppresses only the recognized cursor and restores its stylesheet on stop', () => {
   const page = fixture();
@@ -176,4 +177,30 @@ test('an unreadable position during recording restores the original cursor for t
   const result = page.control.stop();
   assert.equal(result.safeForAnimation, false);
   assert.equal(result.tracking.valid, false);
+});
+
+
+test('capture streams cursor proof before pagehide and flushes the final samples', () => {
+  const page = fixture();
+  assert.equal(page.control.start(false, true, 'active-clip').safeForAnimation, true);
+  page.root.cursors[0].style.transform = 'translate3d(300px, 400px, 0)';
+  page.observers[0].callback();
+  page.pageListeners.pagehide();
+  assert.deepEqual(page.messages.map(message => message.chunk.captureId), ['active-clip', 'active-clip']);
+  assert.equal(page.messages[0].chunk.points[0].x, 112);
+  assert.equal(page.messages[1].chunk.points[0].x, 312);
+  assert.equal(page.messages[0].chunk.from, page.messages[1].chunk.from);
+  assert.equal(page.root.styles.length, 0);
+});
+
+test('tracking restarted on the new document can verify an overlay that loads late', () => {
+  const page = fixture({ supported: false });
+  assert.equal(page.control.start(false, true, 'active-clip').safeForAnimation, false);
+  page.mount();
+  page.observers[0].callback();
+  assert.equal(page.control.report().safeForAnimation, true);
+  assert.equal(page.messages[0].chunk.points[0].x, 112);
+  assert.equal(page.control.start(false, true, 'active-clip').from, page.messages[0].chunk.from);
+  assert.equal(page.messages.length, 1);
+  page.control.stop();
 });

@@ -1,5 +1,5 @@
 import { selectCursorSource } from './cursor-source.js';
-import { cursorEnabled, planCursorHolds, planCursor, cursorExpressions, cursorSvg, ringSvg, cursorFrameRate } from './cursor.js';
+import { cursorEnabled, planCursorHolds, planCursor, cursorExpressions, cursorSvg, ringExpressions, ringSvg, cursorFrameRate } from './cursor.js';
 import sharp from 'sharp';
 import { planEditing, planEditingOverlays, fieldRectangle, editingSvg } from './editing.js';
 import { planKeyboardBadges, keyboardBadgeSvg } from './keyboard.js';
@@ -69,6 +69,8 @@ export async function processVideo(directory, metadata, { calloutRoot = path.dir
     const file = path.join(directory, 'cursor.png');
     await sharp(Buffer.from(cursorSvg)).png().toFile(file);
     args.push('-loop', '1', '-framerate', String(frameRate), '-i', file);
+  }
+  if (cursor.clicks?.length) {
     const ringFile = path.join(directory, 'cursor-rings.png');
     await sharp(Buffer.from(ringSvg)).png().toFile(ringFile);
     args.push('-loop', '1', '-framerate', String(cursorFrameRate), '-i', ringFile);
@@ -85,13 +87,20 @@ export async function processVideo(directory, metadata, { calloutRoot = path.dir
     filters.push(`[editbase${index}][${callouts.length + keyboard.badges.length + index + 1}:v]overlay=0:0:shortest=1:enable='${enabled}'[editbase${index + 1}]`);
   });
   let cursorBase = `editbase${editImages.length}`;
-  if (cursor.enabled) {
-    const expressions = cursorExpressions(cursor);
+  if (cursor.enabled || cursor.clicks?.length) {
     filters.push(`[${cursorBase}]fps=${cursorFrameRate}[cursorbase]`);
-    filters.push(`[${cursorInput + 1}:v]crop=w=64:h=64:x='${expressions.ringFrame}':y=0[ring]`);
-    filters.push(`[cursorbase][ring]overlay=x='${expressions.ringX}':y='${expressions.ringY}':eval=frame:format=auto:shortest=1[ringbase]`);
-    filters.push(`[ringbase][${cursorInput}:v]overlay=x='${expressions.x}':y='${expressions.y}':eval=frame:format=auto:shortest=1[cursorvideo]`);
-    cursorBase = 'cursorvideo';
+    cursorBase = 'cursorbase';
+    if (cursor.clicks?.length) {
+      const expressions = ringExpressions(cursor);
+      filters.push(`[${cursorInput + Number(cursor.enabled)}:v]crop=w=64:h=64:x='${expressions.ringFrame}':y=0[ring]`);
+      filters.push(`[${cursorBase}][ring]overlay=x='${expressions.ringX}':y='${expressions.ringY}':eval=frame:format=auto:shortest=1[ringbase]`);
+      cursorBase = 'ringbase';
+    }
+    if (cursor.enabled) {
+      const { x, y } = cursorExpressions(cursor);
+      filters.push(`[${cursorBase}][${cursorInput}:v]overlay=x='${x}':y='${y}':eval=frame:format=auto:shortest=1[cursorvideo]`);
+      cursorBase = 'cursorvideo';
+    }
   }
   filters.push(`[${cursorBase}]tpad=stop_mode=clone:stop_duration=${keyboardTailSeconds},pad=${keyboard.width}:${keyboard.height}:(ow-iw)/2:0:color=white[keybase0]`);
   keyboard.badges.forEach((badge, index) => filters.push(`[keybase${index}][${callouts.length + index + 1}:v]overlay=x=W-w-8:y=H-h-8:shortest=1:enable='gte(t,${badge.start})*lt(t,${badge.end})'[keybase${index + 1}]`));

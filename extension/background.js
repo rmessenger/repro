@@ -9,7 +9,8 @@ async function offscreen(message) {
   return response;
 }
 async function inject(tabId) {
-  await chrome.scripting.executeScript({ target: { tabId }, files: ['cursor-suppression.js', 'content.js'] });
+  const [result] = await chrome.scripting.executeScript({ target: { tabId }, files: ['cursor-suppression.js', 'content.js'] });
+  return result?.documentId;
 }
 async function ensureOffscreen() {
   if (creatingOffscreen) return creatingOffscreen;
@@ -160,7 +161,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, change) => {
     });
     const request = captureRequests.find(r => r.tabId === tabId && r.enabled);
     if (!request) return;
-    try { await inject(tabId); }
+    try {
+      const documentId = await inject(tabId);
+      if (documentId) await offscreen({ type: 'cursorNewDocument', sessionId: request.sessionId, documentId });
+    }
     catch (error) { await offscreen({ type: 'warning', sessionId: request.sessionId, message: `Page instrumentation unavailable: ${error.message}` }); throw error; }
   };
   return run();
@@ -181,17 +185,19 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       await advance(queue);
       return { state: 'declined' };
     });
-    if (message.type === 'event') {
+    if (['event', 'cursorChunk'].includes(message.type)) {
       const { captureRequests = [] } = await chrome.storage.session.get('captureRequests');
       const request = captureRequests.find(r => r.tabId === sender.tab?.id && r.enabled);
-      if (request) return offscreen({ type: 'event', sessionId: request.sessionId, event: message.event });
+      if (request) return offscreen({ type: message.type, sessionId: request.sessionId, event: message.event, chunk: message.chunk });
       return;
     }
     if (message.type === 'cursorControl') {
       const { captureRequests = [] } = await chrome.storage.session.get('captureRequests');
       const request = captureRequests.find(r => r.sessionId === message.options.sessionId && r.enabled);
       if (!request) throw new Error('This session is not enabled.');
-      const result = await chrome.tabs.sendMessage(request.tabId, { type: 'cursorControl', operation: message.options.operation, probePositions: message.options.probePositions === true, trackPositions: message.options.trackPositions === true });
+      const { operation, probePositions, trackPositions, captureId, documentId } = message.options;
+      const destination = documentId ? { documentId } : { frameId: 0 };
+      const result = await chrome.tabs.sendMessage(request.tabId, { type: 'cursorControl', operation, probePositions, trackPositions, captureId }, destination);
       if (result.error) throw new Error(result.error);
       return result;
     }

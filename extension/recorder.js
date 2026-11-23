@@ -43,6 +43,39 @@ async function upload(kind, blob, metadata) {
   return result;
 }
 function status() { return { sessionId, enabled: Boolean(media), tab, recording: Boolean(recording), completed: Boolean(completed), cursor: media?.getVideoTracks()[0]?.getSettings().cursor, warnings }; }
+function acceptCursorChunk(state, chunk) {
+  if (!state.cursorCoverage || chunk?.captureId !== state.captureId) return;
+  state.cursorCoverage.knownOverlay = true;
+  let span = state.cursorCoverage.spans.find(item => item.from === chunk.from);
+  if (!span) {
+    span = { from: chunk.from, through: chunk.through, points: [] };
+    state.cursorCoverage.spans.push(span);
+  }
+  span.through = Math.max(span.through, chunk.through);
+  for (const point of chunk.points) {
+    if (state.cursorPointCount >= 8000) break;
+    span.points.push([point.at, point.x, point.y, point.opacity]);
+    state.cursorPointCount++;
+  }
+}
+const pageUnavailable = error => /Receiving end does not exist|Could not establish connection|No tab with id|No document with id|frame was removed|message port closed/i.test(error.message);
+async function rearmCursor(state, documentId) {
+  const previous = state.cursorRearm;
+  const rearm = (async () => {
+    await previous;
+    if (state.stopping || recording !== state) return;
+    try {
+      const report = await background('cursorControl', { operation: 'start', captureId: state.captureId, trackPositions: true, documentId });
+      state.cursorCoverage.knownOverlay ||= report.supported === true;
+    } catch (error) {
+      if (!pageUnavailable(error)) throw error;
+    }
+  })();
+  state.cursorRearm = rearm.then(() => undefined, error => {
+    state.warnings.push(`Could not restart cursor tracking after navigation: ${error.message}`);
+  });
+  await rearm;
+}
 function requireMedia() { if (!media) throw new Error('This session is not enabled. Check its approval status or request capture again.'); }
 async function command(name, args = {}) {
   if (name === 'status') return status();
@@ -89,7 +122,10 @@ async function command(name, args = {}) {
   if (!mimeType) throw new Error('WebM recording is unavailable in this browser.');
   const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 2500000 });
   const animateCursor = args.animateCursor && !args.cursorOverlayProbe && !args.cursorProbe;
-  const cursorSuppression = (args.cursorOverlayProbe || animateCursor) ? await background('cursorControl', { operation: 'start', probePositions: args.cursorOverlayProbe === true, trackPositions: animateCursor }) : undefined;
+  const captureId = animateCursor ? crypto.randomUUID() : undefined;
+  const cursorSuppression = (args.cursorOverlayProbe || animateCursor)
+    ? await background('cursorControl', { operation: 'start', probePositions: args.cursorOverlayProbe === true, trackPositions: animateCursor, captureId })
+    : undefined;
   if (cursorSuppression?.verified) await new Promise(resolve => setTimeout(resolve, 200));
   let cursorProbe;
   try {
@@ -98,10 +134,20 @@ async function command(name, args = {}) {
   } catch (error) {
     stream.getTracks().forEach(track => track.stop());
     await cursorProbe?.restore();
-    if (cursorSuppression) await background('cursorControl', { operation: 'stop' });
+    if (cursorSuppression) await background('cursorControl', { operation: 'stop', captureId });
     throw error;
   }
   const state = { cursorSuppression, cursorProbe, pointerSamples: [], canvas, ctx, stream, recorder, chunks: [], started: Date.now(), geometry, args, events: [], samples: [], callouts: [], previous: null, nextSample: 0, warnings: [...warnings] };
+  if (animateCursor) {
+    state.captureId = captureId;
+    state.cursorCoverage = { source, knownOverlay: cursorSuppression?.supported === true, spans: [] };
+    state.cursorPointCount = 0;
+    const points = cursorSuppression?.tracking?.points;
+    if (cursorSuppression?.safeForAnimation && points?.length) {
+      const { at } = points[0];
+      acceptCursorChunk(state, { captureId, from: cursorSuppression.from ?? at, through: at, points });
+    }
+  }
   recording = state;
   recorder.ondataavailable = event => { if (event.data.size) state.chunks.push(event.data); };
   state.done = new Promise((resolve, reject) => {
@@ -113,7 +159,7 @@ async function command(name, args = {}) {
     recording = null;
     stream.getTracks().forEach(track => track.stop());
     await state.cursorProbe?.restore();
-    if (cursorSuppression) await background('cursorControl', { operation: 'stop' });
+    if (cursorSuppression) await background('cursorControl', { operation: 'stop', captureId });
     throw error;
   }
   state.timer = setInterval(() => {
@@ -125,7 +171,7 @@ async function command(name, args = {}) {
       state.samples.push({ t, changed: visualChange(state.previous, current) });
       state.previous = current; state.nextSample = t + 0.2;
     }
-    for (const event of animateCursor && state.cursorSuppression?.safeForAnimation ? state.events.filter(event => event.type === 'click') : state.events) {
+    for (const event of animateCursor ? state.events.filter(event => event.type === 'click') : state.events) {
       if (!['pointerdown', 'click'].includes(event.type) || t - event.t < 0 || t - event.t > 0.45) continue;
       const x = (event.x - geometry.region.x) * canvas.width / geometry.region.width;
       const y = (event.y - geometry.region.y) * canvas.height / geometry.region.height;
@@ -139,32 +185,49 @@ async function command(name, args = {}) {
   state.limit = setTimeout(() => finish().catch(error => { warnings.push(error.message); throw error; }), args.maxSeconds * 1000);
   return { sessionId, recording: true, region: geometry.region, viewport: geometry.viewport, maxSeconds: args.maxSeconds, preserveTiming: args.preserveTiming, cursorProbe: cursorProbe?.report, cursorSuppression };
 }
-async function finish() {
+function finish() {
   const state = recording;
-  if (!state) return;
+  if (state) return state.finishPromise ??= finishRecording(state);
+}
+async function finishRecording(state) {
   state.stopping = true;
+  const ended = Date.now();
   clearInterval(state.timer); clearTimeout(state.limit);
   if (state.recorder.state !== 'inactive') state.recorder.stop();
   await state.done;
   if (recording !== state) return;
+  await state.cursorRearm;
   state.stream.getTracks().forEach(track => track.stop());
   await state.cursorProbe?.restore();
   if (state.cursorSuppression) {
-    try { state.cursorSuppression = await background('cursorControl', { operation: 'stop' }); }
+    try { state.cursorSuppression = await background('cursorControl', { operation: 'stop', captureId: state.captureId }); }
     catch (error) {
-      if (!/Receiving end does not exist|Could not establish connection|No tab with id/.test(error.message)) throw error;
+      if (!pageUnavailable(error)) throw error;
       state.cursorSuppression = { requested: true, safeForAnimation: false, lost: true, error: error.message };
     }
-    if (!state.cursorSuppression.safeForAnimation && state.cursorSuppression.tracking?.valid !== false) state.warnings.push('Cursor suppression could not be verified throughout this clip; do not add an animated pointer.');
+    if (state.cursorCoverage) {
+      acceptCursorChunk(state, state.cursorSuppression.chunk);
+      delete state.cursorSuppression.chunk;
+      if (state.cursorSuppression.tracking) delete state.cursorSuppression.tracking.points;
+    }
+    if (!state.cursorCoverage && !state.cursorSuppression.safeForAnimation && state.cursorSuppression.tracking?.valid !== false) state.warnings.push('Cursor suppression could not be verified throughout this clip; do not add an animated pointer.');
   }
-  completed = { blob: new Blob(state.chunks, { type: state.recorder.mimeType }), metadata: { captureStartedAt: state.started, animateCursor: state.args.animateCursor === true && !state.args.cursorOverlayProbe && !state.args.cursorProbe, cursorSuppression: state.cursorSuppression, cursorProbe: state.cursorProbe?.report, pointerSamples: state.cursorProbe || state.cursorSuppression ? state.pointerSamples : undefined, geometry: state.geometry, duration: (Date.now() - state.started) / 1000, events: state.events, samples: state.samples, callouts: state.callouts, preserveTiming: state.args.preserveTiming, pointerRendering: state.args.animateCursor && state.cursorSuppression?.safeForAnimation ? 'simulated-at-export' : state.cursorSuppression ? 'source-only-overlay-suppression-probe' : state.cursorProbe ? 'source-only-cursor-suppression-probe' : source === 'display' ? 'reconstructed-from-page-events' : 'native-with-background-fallback', warnings: state.warnings } };
+  completed = { blob: new Blob(state.chunks, { type: state.recorder.mimeType }), metadata: { captureStartedAt: state.started, animateCursor: state.args.animateCursor === true && !state.args.cursorOverlayProbe && !state.args.cursorProbe, cursorSuppression: state.cursorSuppression, cursorCoverage: state.cursorCoverage, cursorProbe: state.cursorProbe?.report, pointerSamples: state.cursorProbe || state.cursorSuppression ? state.pointerSamples : undefined, geometry: state.geometry, duration: (ended - state.started) / 1000, events: state.events, samples: state.samples, callouts: state.callouts, preserveTiming: state.args.preserveTiming, pointerRendering: state.cursorCoverage ? 'per-interval-at-export' : state.cursorSuppression ? 'source-only-overlay-suppression-probe' : state.cursorProbe ? 'source-only-cursor-suppression-probe' : source === 'display' ? 'reconstructed-from-page-events' : 'native-with-background-fallback', warnings: state.warnings } };
   recording = null;
 }
 
 async function receive(message) {
+    if (message.type === 'cursorNewDocument') {
+      if (recording?.cursorCoverage && !recording.stopping) await rearmCursor(recording, message.documentId);
+      return;
+    }
+    if (message.type === 'cursorChunk') {
+      if (recording) acceptCursorChunk(recording, message.chunk);
+      return;
+    }
     if (message.type === 'tabActivity') { active = message.active; if (recording?.cursorSuppression) recording.events.push({ type: 'tabActivity', active, t: (Date.now() - recording.started) / 1000 }); return; }
     if (message.type === 'event') {
-      if (recording) {
+      if (recording && !recording.stopping) {
         const event = { ...message.event, t: (message.event.at - recording.started) / 1000 };
         if (['pointermove', 'pointerdown', 'pointerup'].includes(event.type)) {
           recording.pointer = event;

@@ -47,3 +47,23 @@ test('unchanged activity from another window does not invalidate a stationary ag
   assert.deepEqual(result.pointerSamples.map(p => p.t), [1, 3, 4]);
   assert.equal(result.cursorSource.ignoredSamples, 0);
 });
+
+test('a background tab keeps recorded clicks through a reload with no final overlay report', () => {
+  const data = fixture([sample(1, 100, 'pointerdown', false), sample(4, 400, 'pointerdown', false)], []);
+  data.geometry.tabActive = false;
+  data.cursorSuppression = { requested: false, safeForAnimation: false };
+  data.cursorCoverage = { source: 'tab', knownOverlay: true, spans: [] };
+  const result = selectCursorSource(data);
+  assert.deepEqual(result.pointerSamples.map(p => p.x), [100, 400]);
+  assert.deepEqual(result.cursorWindows, [{ start: 0, end: 8 }]);
+  assert.equal(result.cursorSource.backgroundSamples, 2);
+});
+
+test('background fallback does not assume other harnesses hide their cursor', () => {
+  const data = fixture([sample(3, 100, 'pointerdown', false)], []);
+  data.geometry.tabActive = false;
+  data.cursorCoverage = { source: 'tab', knownOverlay: false, spans: [] };
+  const result = selectCursorSource(data);
+  assert.equal(result.pointerSamples.length, 0);
+  assert.equal(result.cursorRingOnly.length, 1);
+});
