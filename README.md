@@ -28,7 +28,7 @@ Captured with Repro on the included demo page. Click an animation for the MP4.
 
 ![A screenshot cropped to only the result message](docs/media/cropped-screenshot.png)
 
-Multiple agents can record separate tabs at the same time. Files are saved locally as MP4 videos and PNG screenshots; the original recording is kept too.
+Multiple agents can record separate tabs at the same time. Repro frames videos around the interaction when it exports the MP4. Screenshots are saved as PNGs.
 
 ## Install
 
@@ -51,7 +51,7 @@ Keep this folder in place. The installer configures Codex and starts the local s
 
 Ask your agent, for example:
 
-> Record me publishing a post. Capture only the publish panel, pause on the result with a label, and save an annotated screenshot.
+> Record me publishing a post. Keep the publish panel visible, pause on the result with a label, and save an annotated screenshot.
 
 The agent selects the tab and requests capture. When the banner appears, click the pinned **REC?** extension icon once. The agent continues automatically—no chat reply needed. That tab stays approved for later clips and screenshots; it isn’t recording between clips.
 

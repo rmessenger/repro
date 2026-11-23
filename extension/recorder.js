@@ -93,19 +93,29 @@ async function command(name, args = {}) {
     return result;
   }
   requireMedia();
-  if (name === 'callout') {
+  if (name === 'include' || name === 'callout') {
     const state = recording;
-    if (!state || state.stopping) throw new Error('Start a recording before adding a callout.');
-    const geometry = await background('resolve', { region: state.geometry.region, padding: 0, highlight: [{ target: args.target, label: args.label, style: 'box' }] });
-    if (recording !== state || state.stopping) throw new Error('The recording ended while resolving the callout target.');
-    if (geometry.viewport.width !== state.geometry.viewport.width || geometry.viewport.height !== state.geometry.viewport.height) throw new Error('The viewport changed during recording. Start a new clip before adding a callout.');
+    if (!state || state.stopping) throw new Error('Start a recording before marking an element.');
+    if (name === 'include' && state.includes.length >= 40) throw new Error('A clip can include at most 40 explicitly marked elements.');
+    const geometry = await background('resolve', { highlight: [{ target: args.target, label: args.label, style: 'box' }] });
+    if (recording !== state || state.stopping) throw new Error('The recording ended while resolving the target.');
+    if (geometry.viewport.width !== state.geometry.viewport.width || geometry.viewport.height !== state.geometry.viewport.height) throw new Error('The viewport changed during recording. Start a new clip before marking an element.');
+    if (name === 'include') {
+      const rect = geometry.highlights[0].rect;
+      state.includes.push({ rect, t: (Date.now() - state.started) / 1000 });
+      return { sessionId, included: true, recording: true };
+    }
     const snapshot = annotatedFrame(geometry);
     const entry = prepareCallout(state, snapshot.canvas, { target: args.target, label: args.label, geometry, annotations: snapshot.annotations }, args.holdSeconds);
-    const saved = await upload('callout', await new Promise(resolve => snapshot.canvas.toBlob(resolve, 'image/png')), { label: args.label, geometry });
-    state.callouts.push({ ...entry, calloutId: saved.calloutId });
-    return { sessionId, recording: recording === state && !state.stopping, calloutId: saved.calloutId, holdSeconds: args.holdSeconds, message: 'Callout saved. Continue immediately; the reading pause will be inserted when the clip is exported.' };
+    const blob = await new Promise(resolve => snapshot.canvas.toBlob(resolve, 'image/png'));
+    if (!blob) throw new Error('Could not save the callout frame.');
+    if (recording !== state || state.stopping) throw new Error('The recording ended while saving the callout.');
+    const calloutId = crypto.randomUUID();
+    state.callouts.push({ ...entry, calloutId, blob });
+    return { sessionId, recording: true, calloutId, holdSeconds: args.holdSeconds, message: 'Callout saved. Continue immediately; the reading pause will be inserted when the clip is exported.' };
   }
-  const geometry = await background('resolve', args);
+  if (name === 'start' && (Object.hasOwn(args, 'region') || Object.hasOwn(args, 'padding'))) throw new Error('Video framing happens at export. Remove region and padding from capture_start.');
+  const geometry = await background('resolve', name === 'start' ? {} : args);
   active = geometry.tabActive;
   if (name === 'screenshot') {
     const snapshot = annotatedFrame(geometry);
@@ -137,7 +147,7 @@ async function command(name, args = {}) {
     if (cursorSuppression) await background('cursorControl', { operation: 'stop', captureId });
     throw error;
   }
-  const state = { cursorSuppression, cursorProbe, pointerSamples: [], canvas, ctx, stream, recorder, chunks: [], started: Date.now(), geometry, args, events: [], samples: [], callouts: [], previous: null, nextSample: 0, warnings: [...warnings] };
+  const state = { recordingId: crypto.randomUUID(), cursorSuppression, cursorProbe, pointerSamples: [], canvas, ctx, stream, recorder, chunks: [], started: Date.now(), geometry, args, events: [], samples: [], callouts: [], includes: [], previous: null, nextSample: 0, warnings: [...warnings] };
   if (animateCursor) {
     state.captureId = captureId;
     state.cursorCoverage = { source, knownOverlay: cursorSuppression?.supported === true, spans: [] };
@@ -164,7 +174,7 @@ async function command(name, args = {}) {
   }
   state.timer = setInterval(() => {
     const t = (Date.now() - state.started) / 1000;
-    cropFrame(ctx, geometry);
+    cropFrame(ctx, state.frameGeometry ?? geometry);
     if (t >= state.nextSample) {
       sampleCtx.drawImage(canvas, 0, 0, 160, 100);
       const current = sampleCtx.getImageData(0, 0, 160, 100).data;
@@ -183,7 +193,7 @@ async function command(name, args = {}) {
     if (!state.cursorSuppression && !state.cursorProbe && state.pointer && needsPointerOverlay(source, active)) drawPointer(ctx, state.pointer, geometry);
   }, 1000 / 15);
   state.limit = setTimeout(() => finish().catch(error => { warnings.push(error.message); throw error; }), args.maxSeconds * 1000);
-  return { sessionId, recording: true, region: geometry.region, viewport: geometry.viewport, maxSeconds: args.maxSeconds, preserveTiming: args.preserveTiming, cursorProbe: cursorProbe?.report, cursorSuppression };
+  return { sessionId, recording: true, framing: args.framing, viewport: geometry.viewport, maxSeconds: args.maxSeconds, preserveTiming: args.preserveTiming, cursorProbe: cursorProbe?.report, cursorSuppression };
 }
 function finish() {
   const state = recording;
@@ -212,7 +222,9 @@ async function finishRecording(state) {
     }
     if (!state.cursorCoverage && !state.cursorSuppression.safeForAnimation && state.cursorSuppression.tracking?.valid !== false) state.warnings.push('Cursor suppression could not be verified throughout this clip; do not add an animated pointer.');
   }
-  completed = { blob: new Blob(state.chunks, { type: state.recorder.mimeType }), metadata: { captureStartedAt: state.started, animateCursor: state.args.animateCursor === true && !state.args.cursorOverlayProbe && !state.args.cursorProbe, cursorSuppression: state.cursorSuppression, cursorCoverage: state.cursorCoverage, cursorProbe: state.cursorProbe?.report, pointerSamples: state.cursorProbe || state.cursorSuppression ? state.pointerSamples : undefined, geometry: state.geometry, duration: (ended - state.started) / 1000, events: state.events, samples: state.samples, callouts: state.callouts, preserveTiming: state.args.preserveTiming, pointerRendering: state.cursorCoverage ? 'per-interval-at-export' : state.cursorSuppression ? 'source-only-overlay-suppression-probe' : state.cursorProbe ? 'source-only-cursor-suppression-probe' : source === 'display' ? 'reconstructed-from-page-events' : 'native-with-background-fallback', warnings: state.warnings } };
+  const videoBlob = new Blob(state.chunks, { type: state.recorder.mimeType });
+  const calloutBlobs = state.callouts.map(callout => callout.blob);
+  completed = { blob: new Blob([videoBlob, ...calloutBlobs]), metadata: { recordingId: state.recordingId, framing: state.args.framing ?? 'auto', viewportChanged: Boolean(state.frameGeometry), videoBytes: videoBlob.size, calloutSizes: calloutBlobs.map(blob => blob.size), includes: state.includes, captureStartedAt: state.started, animateCursor: state.args.animateCursor === true && !state.args.cursorOverlayProbe && !state.args.cursorProbe, cursorSuppression: state.cursorSuppression, cursorCoverage: state.cursorCoverage, cursorProbe: state.cursorProbe?.report, pointerSamples: state.cursorProbe || state.cursorSuppression ? state.pointerSamples : undefined, geometry: state.geometry, duration: (ended - state.started) / 1000, events: state.events, samples: state.samples, callouts: state.callouts.map(({ blob: _, ...callout }) => callout), preserveTiming: state.args.preserveTiming, pointerRendering: state.cursorCoverage ? 'per-interval-at-export' : state.cursorSuppression ? 'source-only-overlay-suppression-probe' : state.cursorProbe ? 'source-only-cursor-suppression-probe' : source === 'display' ? 'reconstructed-from-page-events' : 'native-with-background-fallback', warnings: state.warnings } };
   recording = null;
 }
 
@@ -229,6 +241,19 @@ async function receive(message) {
     if (message.type === 'event') {
       if (recording && !recording.stopping) {
         const event = { ...message.event, t: (message.event.at - recording.started) / 1000 };
+        if (event.type === 'viewportResize') {
+          const { width, height } = event.viewport;
+          if (width !== recording.geometry.viewport.width || height !== recording.geometry.viewport.height || recording.frameGeometry) {
+            recording.frameGeometry = { viewport: event.viewport, region: { x: 0, y: 0, width, height } };
+          }
+          return;
+        }
+        if (event.type === 'pointerdown') recording.dragOrigin = event;
+        if (event.type === 'pointerup') {
+          const origin = recording.dragOrigin;
+          recording.dragOrigin = undefined;
+          if (origin && Math.hypot(event.x - origin.x, event.y - origin.y) > 8) recording.events.push({ ...event, type: 'dragEnd' });
+        }
         if (['pointermove', 'pointerdown', 'pointerup'].includes(event.type)) {
           recording.pointer = event;
           if (recording.cursorProbe || recording.cursorSuppression) recording.pointerSamples.push({ t: event.t, x: event.x, y: event.y, type: event.type, buttons: event.buttons, tabActive: active });

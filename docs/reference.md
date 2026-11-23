@@ -48,35 +48,35 @@ The service still exposes HTTP MCP. Configure the client with the local `/mcp` U
 
 ## Agent workflow
 
-1. `capture_start` with `tabId`, exact current `url`, and optional region.
+1. `capture_start` with `tabId`, and exact current `url`.
 2. Save the returned `sessionId`. The user clicks the toolbar icon once when the requested tab is presented. If start returns `awaiting_approval` or `queued`, call `capture_wait` with the returned `sessionId` and `requestId`. Begin interactions only when `recording` is true. A pending request can be waited on again.
 3. Interact using the normal Chrome browser tools.
-4. `capture_stop` with `sessionId` to receive the clip, original, and manifest paths.
+4. `capture_stop` with `sessionId` to receive the clip, its framing, and the manifest path.
 5. Pass the same `sessionId` to start additional clips or use `capture_screenshot` for annotated static images. The same enabled tab needs no additional approval between clips.
 6. Leave the session enabled between testing sessions. Use `capture_release` with its `sessionId` only when you want to stop sharing or cancel a pending approval.
 
-The crop is fixed in viewport coordinates for a clip. Scroll relevant elements into view before starting. Avoid resizing the browser during a clip. Use a larger container to include menus or other content that appears later. Missing or ambiguous targets produce errors rather than silently selecting something else. Codex's private accessibility element numbers are not portable to this extension.
+Repro records the viewport, then chooses a fixed crop around clicks, edits, callouts, and any elements marked with `capture_include`. Mark visible results or context the viewer needs with `capture_include`; it adds no overlay or pause. Use `framing: "viewport"` to export the whole viewport. Avoid resizing during a clip. Missing or ambiguous targets produce errors, and Chrome browser-use accessibility element numbers are not accepted as Repro targets.
 
 CLI and MCP use exactly the same validation and service:
 
 ```sh
 npm run capture -- status
-npm run capture -- start '{"tabId":1234,"url":"https://example.com/settings","region":{"testId":"publish-dialog"}}'
+npm run capture -- start '{"tabId":1234,"url":"https://example.com/settings"}'
 npm run capture -- wait '{"sessionId":"<session UUID>","requestId":"<UUID returned by start>"}'
 # Use the existing Chrome controls here.
+npm run capture -- include '{"sessionId":"<session UUID>","target":{"testId":"publish-dialog"}}'
 npm run capture -- stop '{"sessionId":"<session UUID>","name":"Publish failed"}'
 npm run capture -- screenshot '{"sessionId":"<session UUID>","region":{"testId":"publish-dialog"},"highlight":[{"target":{"role":"button","name":"Publish"},"label":"No response"}]}'
 npm run capture -- release '{"sessionId":"<session UUID>"}'
 ```
 
-Other region examples:
+Screenshot region examples:
 
 ```json
 {"region":{"selector":".settings-panel"}}
 {"region":{"role":"dialog","name":"Publish post"},"padding":32}
 {"region":[{"testId":"title"},{"testId":"error"}]}
 {"region":{"x":100,"y":80,"width":700,"height":500},"padding":0}
-{"preserveTiming":true,"maxSeconds":30}
 ```
 
 Screenshot highlights accept `style: "box"` (default) or `"arrow"`. Use a crop with enough space for the label. With no region, capture uses the visible viewport. Default clip limit is 90 seconds, maximum 180. After automatic stop, call `stop` to retrieve the completed clip before starting another.
@@ -93,7 +93,7 @@ Approved streams remain available between clips without continuously recording t
 
 Recordings automatically show action keys and shortcuts as an ordered “Recent keys” badge, for example **Tab → Enter → Tab**. Ordinary letters, digits, text-entry spaces, IME composition, and modifier-only presses are omitted. Consecutive repeats collapse to **Tab ×3**; separated repeats retain their order. Event metadata contains the shortcut label, never ordinary typed characters, input values, or clipboard contents.
 
-Keys within 0.8 seconds form a burst. The badge appears after that burst’s last key, so it never announces an action before it happens. Each sequence stays visible for at least 1.5 seconds. Long sequences wrap and paginate in order; queued badges are summaries of recent keys, not a claim that every key occurs at display time. Idle trimming keeps keyboard context. If recording ends before badges finish, export briefly holds the final frame so no queued badge is lost. Very small crops use a readable footer instead of squeezing text into the content. The manifest records badge timing and any extra tail time; the original WebM stays unchanged.
+Keys within 0.8 seconds form a burst. The badge appears after that burst’s last key, so it never announces an action before it happens. Each sequence stays visible for at least 1.5 seconds. Long sequences wrap and paginate in order; queued badges are summaries of recent keys, not a claim that every key occurs at display time. Idle trimming keeps keyboard context. If recording ends before badges finish, export briefly holds the final frame so no queued badge is lost. Very small crops use a readable footer instead of squeezing text into the content. The manifest records badge timing and any extra tail time; the playback manifest identifies added time.
 
 This works only for keyboard events delivered to the page. Browser/OS-reserved shortcuts and keys inside inaccessible cross-origin frames may not be observed. No extra tool call or typing delay is needed.
 
@@ -107,7 +107,7 @@ This guidance is supplied in server instructions, the recording tool description
 
 ## Automatic editing cues
 
-Edited text fields receive a red outline and an “Editing” label in the exported MP4. The extension observes input events and field rectangles without intercepting input or storing typed values in event metadata. Rectangles follow layout changes immediately after an input event; fixed recording crops still do not follow the page.
+Edited text fields receive a red outline and an “Editing” label in the exported MP4. The extension observes input events and field rectangles without intercepting input or storing typed values in event metadata. Rectangles follow layout changes immediately after an input event; the export crop can cover the field across those changes.
 
 When captured footage moves quickly between edits, export adds just enough reading time to reach 0.5 seconds between fields, or 0.8 seconds after a selection before editing. Existing retained pauses and manual callouts count toward that minimum. An inserted hold shows “Next: edit” around the upcoming field and repeats an actual pre-edit frame. It never reconstructs an uncaptured application state. If there is no distinct frame between actions, export skips the hold and returns a warning. Observe the selected state before editing; use a callout when visibility of a particular state must be guaranteed.
 
@@ -130,13 +130,13 @@ At an important result, call `capture_callout`:
 
 The tool saves the current annotated frame and returns immediately, without waiting for `holdSeconds`. Continue interacting normally. When `capture_stop` exports the MP4, it inserts that frame at the captured moment for three seconds by default (1–10 supported), then plays the following source footage. Idle trimming retains context around the callout; it never removes the inserted reading time. No new approval is needed.
 
-The website and live recording never pause. `original.webm` stays uninterrupted and contains no callout inserts. The manifest separates source time, omitted idle time, inserted reading time, and the final playback timeline. Each saved callout PNG is included alongside the exported clip. Use element targets inside the current crop; a changed viewport or crop too small for a readable label produces an actionable error. Up to 20 callouts can be added per clip. The clip’s `maxSeconds` limits source recording time; inserted holds can make the exported video longer.
+The website and live recording continue during callouts. The manifest separates source time, omitted idle time, inserted reading time, and the final playback timeline. Each saved callout PNG is included alongside the exported clip. Use targets visible in the viewport. Repro includes the annotated area and label in the export. Up to 20 callouts can be added per clip. The clip’s `maxSeconds` limits source recording time; inserted holds can make the exported video longer.
 
 These are editorial freeze-frames, not application delays. `preserveTiming` preserves the complete original footage, with any requested callouts still added to the exported MP4.
 
 ## Timing and evidence fidelity
 
-The recorder samples a downscaled clean crop five times per second. Changes above a small area/color threshold and page input identify activity. It retains 0.6 seconds before and 0.7 seconds after interactions, and collapses idle gaps of at least 0.8 seconds between retained activity windows. The initial 0.8 seconds and final 0.6 seconds remain. Small blinking carets generally do not retain a gap.
+Repro samples visual changes five times per second within the exported video frame. Changes above a small area/color threshold and page input identify activity. It retains 0.6 seconds before and 0.7 seconds after interactions, and collapses idle gaps of at least 0.8 seconds between retained activity windows. The initial 0.8 seconds and final 0.6 seconds remain. Small blinking carets generally do not retain a gap.
 
 `animateCursor` defaults to true. For the recognized Codex overlay, Repro hides only its cursor during capture, saves pointer events, then draws a reconstructed pointer at 30fps during export. Point-to-point moves use minimum-jerk easing (`10u³ − 15u⁴ + 6u⁵`), based on [Flash and Hogan (1985)](https://pubmed.ncbi.nlm.nih.gov/4020415/). The duration heuristic is an editorial choice: longer distances receive more travel time, capped at 0.65 seconds. Paths are direct; observed dragging retains its sampled path. This visualizes recorded inputs, not the physical mouse's exact motion.
 
@@ -144,7 +144,7 @@ When inputs are too close together, export inserts frozen backdrop frames to all
 
 Repro checks that it can read the overlay position before hiding the cursor. Unknown cursor implementations remain visible when the browser shows them. On page reload or navigation, Repro retains cursor data from the old page and checks the new page before hiding its cursor. Verified portions and background Chrome tab footage with a recognized Codex overlay can use reconstructed cursors. Unverified foreground portions retain the cursor already in the footage, with click rings where clicks were captured. Internal Codex selectors may change. `animateCursor:false` retains the previous source-cursor/background-fallback behavior. Diagnostic `cursorProbe` and `cursorOverlayProbe` modes remain opt-in and do not animate.
 
-Timing information stays in the sidecar file rather than covering the video. `manifest.json` records the original-to-edited timeline, input timestamps, crop, and source URL. `original.webm` preserves the entire cropped recording. `preserveTiming: true` disables trimming for performance bugs or subtle visual changes. The heuristic cannot distinguish agent thinking from an application freeze; use the original and timestamps when timing is evidence. It does not remove all animations, spinners, or large repetitive changes.
+Timing information stays in the sidecar file rather than covering the video. `manifest.json` records the original-to-edited timeline, input timestamps, crop, and source URL. Repro deletes the temporary full-viewport video and full-size callout frames after a successful export. If export fails, retry `capture_stop` with the same session. `preserveTiming: true` retains actual delays for performance bugs or subtle visual changes. It does not remove all animations, spinners, or large repetitive changes.
 
 ## Multiple agents
 
@@ -161,8 +161,8 @@ Approvals are serialized across agents. Approving tab A starts its clip, then pr
 - Top-level DOM, open shadow roots, and same-origin frames. Cross-origin frame targeting/click instrumentation and closed shadow roots are not supported. Their pixels can still appear in a viewport capture.
 - Role/name matching supports common native controls and explicit ARIA roles, not the entire accessibility-name specification. Test IDs or CSS selectors are the precise fallback.
 - Captures page content, not Chrome toolbar, native file pickers, or browser permission dialogs.
-- Fixed crops do not follow moving elements. Navigation may invalidate the region or site instrumentation permissions; start a fresh clip and request approval again when necessary.
-- Original and edited files contain whatever is visible in the crop. There is no automatic redaction.
+- Auto-framing uses a fixed crop. Mark an element again if its new position matters. Navigation may change site instrumentation permissions.
+- The temporary source contains the full viewport. Export framing is not redaction.
 
 ## Development
 

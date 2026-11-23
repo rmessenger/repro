@@ -4,20 +4,42 @@ import sharp from 'sharp';
 import { planEditing, planEditingOverlays, fieldRectangle, editingSvg } from './editing.js';
 import { planKeyboardBadges, keyboardBadgeSvg } from './keyboard.js';
 import { spawn } from 'node:child_process';
-import { writeFile, readFile, copyFile } from 'node:fs/promises';
+import { writeFile, readFile, copyFile, rename } from 'node:fs/promises';
 import path from 'node:path';
-import { planTimeline } from './timeline.js';
+import { planTimeline, visualChange } from './timeline.js';
+import { planFraming } from './framing.js';
 import { planPlayback, frameRate } from './playback.js';
-export function run(binary, args) {
+export function run(binary, args, onStdout) {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
-    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stdout.on('data', onStdout ?? (chunk => { stdout += chunk; }));
     child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-8000); });
     child.on('error', reject);
     child.on('close', code => code === 0 ? resolve(stdout) : reject(new Error(`${binary} exited ${code}: ${stderr}`)));
   });
 }
+async function sampleFramedChanges(raw, crop) {
+  const samples = [];
+  let previous, pending = Buffer.alloc(0);
+  const bytes = 160 * 100 * 4;
+  await run('ffmpeg', ['-v', 'error', '-i', raw, '-vf', `${crop},fps=5,scale=160:100`, '-an', '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1'], chunk => {
+    pending = Buffer.concat([pending, chunk]);
+    while (pending.length >= bytes) {
+      const current = pending.subarray(0, bytes);
+      samples.push({ t: samples.length / 5, changed: visualChange(previous, current) });
+      previous = current;
+      pending = pending.subarray(bytes);
+    }
+  });
+  return samples;
+}
+
+export function videoResult(manifest) {
+  const { clip, original, framing, duration, keptSeconds, insertedSeconds, outputDurationSeconds, callouts, keyboardTailSeconds, omittedSeconds, events, automaticHoldSeconds, cursorHoldSeconds, warnings } = manifest;
+  return { clip, ...(original && { original }), ...(framing && { framing }), manifest: path.join(path.dirname(clip), 'manifest.json'), durationSeconds: duration, keptSeconds, insertedSeconds, outputDurationSeconds, calloutCount: callouts?.length ?? 0, keyboardTailSeconds, omittedSeconds, clickCount: events.filter(e => ['pointerdown', 'click'].includes(e.type)).length, automaticHoldSeconds, cursorHoldSeconds, warnings };
+}
+
 export async function processVideo(directory, metadata, { calloutRoot = path.dirname(directory) } = {}) {
   metadata = selectCursorSource(metadata);
   const raw = path.join(directory, 'original.webm');
@@ -25,27 +47,39 @@ export async function processVideo(directory, metadata, { calloutRoot = path.dir
   const stream = probe.streams.find(s => s.codec_type === 'video');
   const probed = Number(probe.format.duration);
   const duration = Number.isFinite(probed) ? Math.min(probed, metadata.duration) : metadata.duration;
-  const timeline = planTimeline(duration, metadata.samples, cursorEnabled(metadata) ? [...metadata.events, ...(metadata.pointerSamples || [])] : metadata.events, metadata.preserveTiming, metadata.callouts);
+  const framing = metadata.framing ? planFraming(metadata, stream) : undefined;
+  const frame = framing?.pixels ?? stream;
+  const crop = framing?.reason === 'interaction-bounds' ? `crop=${frame.width}:${frame.height}:${frame.x}:${frame.y}` : undefined;
+  if (framing) metadata = { ...metadata, geometry: { ...metadata.geometry, region: framing.region } };
+  const samples = crop && !metadata.preserveTiming && duration >= 3 ? await sampleFramedChanges(raw, crop) : metadata.samples;
+  const events = [...metadata.events, ...(metadata.includes || []), ...(cursorEnabled(metadata) ? metadata.pointerSamples || [] : [])];
+  const timeline = planTimeline(duration, samples, events, metadata.preserveTiming, metadata.callouts);
   const callouts = metadata.callouts || [];
   if (callouts.length > 20) throw new Error('A clip can contain at most 20 callouts.');
   const editing = planEditing(metadata.events, timeline, callouts, duration, metadata.preserveTiming);
-  editing.holds = editing.holds.filter(hold => fieldRectangle(hold.field.rect, metadata.geometry, stream));
+  editing.holds = editing.holds.filter(hold => fieldRectangle(hold.field.rect, metadata.geometry, frame));
   const basePlayback = planPlayback(timeline, callouts, duration, editing.holds);
   const cursorTiming = planCursorHolds(metadata, basePlayback);
   const playback = planPlayback(timeline, callouts, duration, editing.holds, cursorTiming.holds);
-  const cursor = planCursor(metadata, playback, metadata.geometry, stream, cursorTiming.holds);
-  editing.overlays = planEditingOverlays(editing, playback, metadata.geometry, stream);
+  const cursor = planCursor(metadata, playback, metadata.geometry, frame, cursorTiming.holds);
+  editing.overlays = planEditingOverlays(editing, playback, metadata.geometry, frame);
   const args = ['-y', '-v', 'error', '-i', raw];
   for (const [index, callout] of callouts.entries()) {
-    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(callout.calloutId || '')) throw new Error('Invalid callout image ID.');
-    const imageDirectory = path.join(calloutRoot, callout.calloutId);
-    const imageMetadata = JSON.parse(await readFile(path.join(imageDirectory, 'manifest.json'), 'utf8'));
-    if (!metadata.sessionId || imageMetadata.sessionId !== metadata.sessionId) throw new Error('The callout image belongs to another capture session.');
     const image = path.join(directory, `callout-${index + 1}.png`);
-    await copyFile(path.join(imageDirectory, 'screenshot.png'), image);
+    if (framing) {
+      const source = path.join(directory, `source-callout-${index + 1}.png`);
+      if (crop) await sharp(source).extract({ left: frame.x, top: frame.y, width: frame.width, height: frame.height }).png().toFile(image);
+      else await copyFile(source, image);
+    } else {
+      if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(callout.calloutId || '')) throw new Error('Invalid callout image ID.');
+      const imageDirectory = path.join(calloutRoot, callout.calloutId);
+      const imageMetadata = JSON.parse(await readFile(path.join(imageDirectory, 'manifest.json'), 'utf8'));
+      if (!metadata.sessionId || imageMetadata.sessionId !== metadata.sessionId) throw new Error('The callout image belongs to another capture session.');
+      await copyFile(path.join(imageDirectory, 'screenshot.png'), image);
+    }
     args.push('-loop', '1', '-framerate', String(frameRate), '-i', image);
   }
-  const keyboard = planKeyboardBadges(metadata.events, playback, stream);
+  const keyboard = planKeyboardBadges(metadata.events, playback, frame);
   for (const [index, badge] of keyboard.badges.entries()) {
     const file = path.join(directory, `keys-${index + 1}.png`);
     await sharp(Buffer.from(keyboardBadgeSvg(badge))).png().toFile(file);
@@ -58,7 +92,7 @@ export async function processVideo(directory, metadata, { calloutRoot = path.dir
     if (index < 0) {
       index = editImages.length;
       const file = path.join(directory, `editing-${index + 1}.png`);
-      await sharp(Buffer.from(editingSvg(overlay.rect, overlay.label, stream))).png().toFile(file);
+      await sharp(Buffer.from(editingSvg(overlay.rect, overlay.label, frame))).png().toFile(file);
       editImages.push({ key, file });
       args.push('-loop', '1', '-framerate', String(frameRate), '-i', file);
     }
@@ -75,11 +109,12 @@ export async function processVideo(directory, metadata, { calloutRoot = path.dir
     await sharp(Buffer.from(ringSvg)).png().toFile(ringFile);
     args.push('-loop', '1', '-framerate', String(cursorFrameRate), '-i', ringFile);
   }
+  const sourceFilters = crop ? `${crop},` : '';
   const filters = playback.map((segment, index) => segment.type === 'video'
-    ? `[0:v]fps=${frameRate},trim=start_frame=${segment.startFrame}:end_frame=${segment.endFrame},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[out${index}]`
+    ? `[0:v]${sourceFilters}fps=${frameRate},trim=start_frame=${segment.startFrame}:end_frame=${segment.endFrame},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[out${index}]`
     : ['autoHold', 'cursorHold'].includes(segment.type)
-      ? `[0:v]fps=${frameRate},trim=start_frame=${segment.sourceFrame}:end_frame=${segment.sourceFrame + 1},setpts=PTS-STARTPTS,loop=loop=${segment.frames - 1}:size=1:start=0,trim=end_frame=${segment.frames},setpts=N/(${frameRate}*TB),setsar=1,format=yuv420p[out${index}]`
-    : `[${segment.calloutIndex + 1}:v]scale=${stream.width}:${stream.height}:force_original_aspect_ratio=decrease,pad=${stream.width}:${stream.height}:(ow-iw)/2:(oh-ih)/2:color=white,trim=end_frame=${segment.frames},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[out${index}]`);
+      ? `[0:v]${sourceFilters}fps=${frameRate},trim=start_frame=${segment.sourceFrame}:end_frame=${segment.sourceFrame + 1},setpts=PTS-STARTPTS,loop=loop=${segment.frames - 1}:size=1:start=0,trim=end_frame=${segment.frames},setpts=N/(${frameRate}*TB),setsar=1,format=yuv420p[out${index}]`
+    : `[${segment.calloutIndex + 1}:v]scale=${frame.width}:${frame.height}:force_original_aspect_ratio=decrease,pad=${frame.width}:${frame.height}:(ow-iw)/2:(oh-ih)/2:color=white,trim=end_frame=${segment.frames},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[out${index}]`);
   const keyboardTailSeconds = Math.max(0, keyboard.end - (playback.at(-1)?.outputEnd || 0));
   filters.push(`${playback.map((_, i) => `[out${i}]`).join('')}concat=n=${playback.length}:v=1:a=0,format=yuv420p[editbase0]`);
   editImages.forEach((_, index) => {
@@ -106,17 +141,24 @@ export async function processVideo(directory, metadata, { calloutRoot = path.dir
   keyboard.badges.forEach((badge, index) => filters.push(`[keybase${index}][${callouts.length + index + 1}:v]overlay=x=W-w-8:y=H-h-8:shortest=1:enable='gte(t,${badge.start})*lt(t,${badge.end})'[keybase${index + 1}]`));
   filters.push(`[keybase${keyboard.badges.length}]format=yuv420p[final]`);
   const output = path.join(directory, 'clip.mp4');
+  const draft = path.join(directory, 'clip-working.mp4');
   const filterFile = path.join(directory, 'export-filters.txt');
   await writeFile(filterFile, filters.join(';'));
-  args.push('-filter_complex_script', filterFile, '-map', '[final]', '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-movflags', '+faststart', output);
+  args.push('-filter_complex_script', filterFile, '-map', '[final]', '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-movflags', '+faststart', draft);
   await run('ffmpeg', args);
   const keptSeconds = timeline.reduce((sum, segment) => sum + segment.end - segment.start, 0);
   const insertedSeconds = playback.filter(segment => segment.type !== 'video').reduce((sum, segment) => sum + segment.frames / frameRate, 0);
   const automaticHoldSeconds = playback.filter(segment => segment.type === 'autoHold').reduce((sum, segment) => sum + segment.frames / frameRate, 0);
   const warnings = [...(metadata.warnings || []), ...editing.warnings, ...cursorTiming.warnings];
-  const outputDurationSeconds = Number(await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', output]));
+  const outputDurationSeconds = Number(await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', draft]));
+  if (!Number.isFinite(outputDurationSeconds) || outputDurationSeconds <= 0) throw new Error('Export did not produce a playable video.');
+  await rename(draft, output);
   const cursorHoldSeconds = playback.filter(segment => segment.type === 'cursorHold').reduce((sum, segment) => sum + segment.frames / frameRate, 0);
-  const manifest = { ...metadata, duration, timeline, playback, cursor: { ...cursor, holds: cursorTiming.holds }, cursorHoldSeconds, editing, warnings, automaticHoldSeconds, keyboard, keyboardTailSeconds, keptSeconds, insertedSeconds, outputDurationSeconds, omittedSeconds: duration - keptSeconds, sourceVideo: { width: stream.width, height: stream.height }, video: { width: keyboard.width, height: keyboard.height }, original: raw, clip: output };
-  await writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest, null, 2));
-  return { clip: output, original: raw, manifest: path.join(directory, 'manifest.json'), durationSeconds: duration, keptSeconds, insertedSeconds, outputDurationSeconds, calloutCount: callouts.length, keyboardTailSeconds, omittedSeconds: duration - keptSeconds, clickCount: metadata.events.filter(e => ['pointerdown', 'click'].includes(e.type)).length, automaticHoldSeconds, cursorHoldSeconds, warnings };
+  const details = { ...metadata };
+  delete details.videoBytes; delete details.calloutSizes;
+  const manifest = { ...details, ...(framing && { framing }), duration, timeline, playback, cursor: { ...cursor, holds: cursorTiming.holds }, cursorHoldSeconds, editing, warnings, automaticHoldSeconds, keyboard, keyboardTailSeconds, keptSeconds, insertedSeconds, outputDurationSeconds, omittedSeconds: duration - keptSeconds, sourceVideo: { width: stream.width, height: stream.height }, video: { width: keyboard.width, height: keyboard.height }, ...(!framing && { original: raw }), clip: output };
+  const manifestPath = path.join(directory, 'manifest.json');
+  await writeFile(`${manifestPath}.working`, JSON.stringify(manifest, null, 2));
+  await rename(`${manifestPath}.working`, manifestPath);
+  return videoResult(manifest);
 }

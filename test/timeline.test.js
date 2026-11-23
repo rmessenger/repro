@@ -20,9 +20,11 @@ test('tiny changes such as a caret do not prevent idle trimming', () => {
   second.fill(255, 0, 100 * 4);
   assert.equal(visualChange(first, second), true);
 });
-test('region schemas accept unions and reject invalid rectangles', () => {
-  assert.equal(schemas.start.parse({ region: [{ testId: 'dialog' }, { role: 'button', name: 'Save' }] }).padding, 24);
-  assert.throws(() => schemas.start.parse({ region: { x: 0, y: 0, width: -1, height: 50 } }));
+test('screenshot regions accept unions while recording uses automatic framing', () => {
+  assert.equal(schemas.screenshot.parse({ sessionId: crypto.randomUUID(), region: [{ testId: 'dialog' }, { role: 'button', name: 'Save' }] }).padding, 24);
+  assert.equal(schemas.start.parse({}).framing, 'auto');
+  assert.throws(() => schemas.start.parse({ region: { x: 0, y: 0, width: 100, height: 50 } }));
+  assert.throws(() => schemas.start.parse({ padding: 24 }));
   assert.throws(() => schemas.start.parse({ maxSeconds: 900 }));
 });
 

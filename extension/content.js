@@ -36,13 +36,17 @@
     }
     return result;
   }
+  function viewportRect(element, offset) {
+    const rect = element?.getBoundingClientRect?.();
+    if (rect?.width && rect.height) return { x: rect.x + offset.x, y: rect.y + offset.y, width: rect.width, height: rect.height };
+  }
   function fieldDetail(element, offset) {
     const field = element?.closest?.('input,textarea,[contenteditable=""],[contenteditable="true"]');
     if (!field || field.tagName === 'INPUT' && !['text', 'search', 'email', 'url', 'tel', 'number', ''].includes(field.type)) return undefined;
-    const rect = field.getBoundingClientRect();
-    if (!rect.width || !rect.height) return undefined;
+    const rect = viewportRect(field, offset);
+    if (!rect) return undefined;
     if (!fields.has(field)) fields.set(field, ++nextField);
-    return { id: fields.get(field), rect: { x: rect.x + offset.x, y: rect.y + offset.y, width: rect.width, height: rect.height } };
+    return { id: fields.get(field), rect };
   }
   function observe() {
     for (const { doc } of documents()) {
@@ -57,8 +61,9 @@
         const rect = event.target?.getBoundingClientRect?.();
         const element = event.composedPath?.()[0] || event.target;
         const field = fieldDetail(element, offset);
+        const targetRect = ['pointerdown', 'click'].includes(type) ? viewportRect(element?.closest?.('button,a[href],input,textarea,select,label,summary,[role=button],[role=menuitem],[role=option],[role=tab],[role=checkbox],[role=radio],[role=switch]') || element, offset) : undefined;
         const keyLabel = type === 'keydown' ? keyboardLabel(event) : undefined;
-        send({ type, ...(['pointermove', 'pointerdown', 'pointerup'].includes(type) ? { buttons: event.buttons } : {}), ...(field ? { field } : {}), ...(keyLabel ? { keyLabel } : {}), at: Date.now(), x: type === 'click' ? (rect?.x || 0) + (rect?.width || 0) / 2 + offset.x : (event.clientX || 0) + offset.x, y: type === 'click' ? (rect?.y || 0) + (rect?.height || 0) / 2 + offset.y : (event.clientY || 0) + offset.y });
+        send({ type, ...(['pointermove', 'pointerdown', 'pointerup'].includes(type) ? { buttons: event.buttons } : {}), ...(field ? { field } : {}), ...(targetRect ? { targetRect } : {}), ...(keyLabel ? { keyLabel } : {}), at: Date.now(), x: type === 'click' ? (rect?.x || 0) + (rect?.width || 0) / 2 + offset.x : (event.clientX || 0) + offset.x, y: type === 'click' ? (rect?.y || 0) + (rect?.height || 0) / 2 + offset.y : (event.clientY || 0) + offset.y });
         if (type === 'input' && field) requestAnimationFrame(() => {
           const updated = fieldDetail(element, documents().find(entry => entry.doc === doc)?.offset || offset);
           if (updated) send({ type: 'editlayout', field: updated, at: Date.now() });
@@ -70,6 +75,7 @@
   const observer = new MutationObserver(observe);
   observer.observe(document, { subtree: true, childList: true });
   addEventListener('load', observe, { capture: true, signal: listeners.signal });
+  addEventListener('resize', () => send({ type: 'viewportResize', at: Date.now(), viewport: { width: innerWidth, height: innerHeight } }), { signal: listeners.signal });
   function roots(doc) {
     const result = [doc];
     for (const element of doc.querySelectorAll('*')) if (element.shadowRoot) result.push(...roots(element.shadowRoot));
@@ -81,7 +87,7 @@
     return (element.getAttribute('aria-label') || Array.from(element.labels || []).map(label => label.textContent).join(' ') || element.innerText || element.getAttribute('alt') || '').trim().replace(/\s+/g, ' ');
   }
   function role(element) {
-    return element.getAttribute('role') || ({ BUTTON: 'button', SELECT: 'combobox', TEXTAREA: 'textbox', A: 'link', DIALOG: 'dialog' }[element.tagName]) || (element.tagName === 'INPUT' ? ({ checkbox: 'checkbox', radio: 'radio', button: 'button', submit: 'button' }[element.type] || 'textbox') : '');
+    return element.getAttribute('role') || ({ BUTTON: 'button', SELECT: 'combobox', TEXTAREA: 'textbox', A: 'link', DIALOG: 'dialog', H1: 'heading', H2: 'heading', H3: 'heading', H4: 'heading', H5: 'heading', H6: 'heading' }[element.tagName]) || (element.tagName === 'INPUT' ? ({ checkbox: 'checkbox', radio: 'radio', button: 'button', submit: 'button' }[element.type] || 'textbox') : '');
   }
   function resolve(target) {
     if ('x' in target) return target;

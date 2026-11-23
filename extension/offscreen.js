@@ -48,14 +48,14 @@ async function command(name, args = {}) {
       return { sessionId: entry.sessionId, released: true };
     }
     const result = await entry.recorder.command(name, args);
-    if (['start', 'screenshot', 'callout'].includes(name)) await background('captureReady', { sessionId: entry.sessionId, recording: entry.recorder.status().recording });
+    if (['start', 'screenshot', 'callout', 'include'].includes(name)) await background('captureReady', { sessionId: entry.sessionId, recording: entry.recorder.status().recording });
     return result;
   });
 }
 function connect() {
   const connection = new WebSocket(`ws://127.0.0.1:${settings.port}`);
   socket = connection;
-  connection.onopen = () => connection.send(JSON.stringify({ type: 'hello', token: settings.token, version: settings.extensionVersion }));
+  connection.onopen = () => connection.send(JSON.stringify({ type: 'hello', token: settings.token, version: settings.extensionVersion, automaticFraming: true }));
   connection.onmessage = async event => {
     const message = JSON.parse(event.data);
     if (!message.id) return;

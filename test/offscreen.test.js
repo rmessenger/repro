@@ -21,5 +21,5 @@ test('offscreen connects without runtime APIs unavailable in offscreen documents
   });
   await import(pathToFileURL(path.join(directory, 'offscreen.js')));
   connections[0].onopen();
-  assert.deepEqual(messages, [{ type: 'hello', token: 'test-token', version: '0.6.1' }]);
+  assert.deepEqual(messages, [{ type: 'hello', token: 'test-token', version: '0.6.1', automaticFraming: true }]);
 });

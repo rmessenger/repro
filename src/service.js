@@ -8,6 +8,7 @@ import { createMcpServer, version } from './mcp-tools.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { schemas } from './schema.js';
 import { processVideo } from './process.js';
+import { recordingParts, saveRecording } from './recording-upload.js';
 export async function createCaptureService(settings, { artifactDirectory = artifacts } = {}) {
 await mkdir(artifactDirectory, { recursive: true });
 const extensionPath = path.join(root, 'dist/extension');
@@ -18,9 +19,10 @@ const installation = {
   agentAction: 'Walk the user through these steps. Do not try to install the extension or approve capture on their behalf. Once connected, retry capture_status, then request a tab through capture_start.',
 };
 const readiness = () => ({ service: 'repro', version, extensionConnected: extension?.readyState === 1, extensionVersion, extensionPath });
-let extensionVersion;
+let extensionVersion, automaticFraming;
 let extension;
 const pending = new Map();
+const exports = new Map();
 function failPending(message) {
   for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(new Error(message)); }
   pending.clear();
@@ -39,6 +41,7 @@ function command(name, args) {
     if (name === 'status') return result;
     throw new Error(JSON.stringify(result));
   }
+  if (['start', 'include'].includes(name) && !automaticFraming) throw new Error('Reload Repro in chrome://extensions to enable automatic video framing.');
   const id = randomUUID();
   const result = new Promise((resolve, reject) => {
     const timer = setTimeout(() => { pending.delete(id); reject(new Error('Capture command timed out; use status to inspect the session.')); }, 180000);
@@ -85,8 +88,17 @@ const server = http.createServer(async (request, response) => {
       const metadataLength = payload.readUInt32BE(0);
       if (metadataLength > 1024 * 1024 || metadataLength + 4 >= payload.length) throw new Error('Invalid capture metadata length.');
       const metadata = JSON.parse(payload.subarray(4, 4 + metadataLength).toString());
-      const directory = path.join(artifactDirectory, randomUUID()); await mkdir(directory);
       const bytes = payload.subarray(4 + metadataLength);
+      if (kind === 'video' && metadata.framing) {
+        const parts = recordingParts(metadata, bytes);
+        const id = metadata.recordingId;
+        if (exports.has(id)) throw new Error('This recording is already exporting. Retry capture_stop when it finishes.');
+        const exporting = saveRecording(path.join(artifactDirectory, id), metadata, parts);
+        exports.set(id, exporting);
+        try { return reply(response, 200, await exporting); }
+        finally { exports.delete(id); }
+      }
+      const directory = path.join(artifactDirectory, randomUUID()); await mkdir(directory);
       if (kind === 'screenshot' || kind === 'callout') {
         const file = path.join(directory, 'screenshot.png'); await writeFile(file, bytes);
         await writeFile(path.join(directory, 'manifest.json'), JSON.stringify(metadata, null, 2));
@@ -121,7 +133,7 @@ wss.on('connection', (socket, request) => {
       if (message.type !== 'hello' || !secureEqual(message.token)) { socket.close(1008, 'Unauthorized'); return; }
       authenticated = true; clearTimeout(timer);
       if (extension) { failPending('Capture connection replaced. The command may have executed; inspect session status before retrying.'); extension.close(1000, 'Reconnected'); }
-      extension = socket; extensionVersion = message.version; return;
+      extension = socket; extensionVersion = message.version; automaticFraming = message.automaticFraming === true; return;
     }
     const entry = pending.get(message.id);
     if (!entry) return;
