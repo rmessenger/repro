@@ -1,6 +1,6 @@
 import { beginCursorProbe } from './cursor-probe.js';
 import { prepareCallout } from './callout.js';
-import { sourceCrop, frameContentRect, recordingScale } from './frame-geometry.js';
+import { sourceCrop, frameContentRect, recordingResolution } from './frame-geometry.js';
 import { layoutAnnotations, drawAnnotations } from './annotations.js';
 import { drawPointer, needsPointerOverlay } from './pointer.js';
 import { acquireMedia } from './capture-media.js';
@@ -13,20 +13,22 @@ const warnings = [];
 function cropFrame(context, geometry) {
   const r = sourceCrop({ width: video.videoWidth, height: video.videoHeight }, geometry);
   context.drawImage(video, r.x, r.y, r.width, r.height, 0, 0, context.canvas.width, context.canvas.height);
+  return r;
 }
-function canvasFor(geometry, scale = 1) {
+function canvasFor(geometry, dimensions) {
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(2, Math.ceil(geometry.region.width * scale / 2) * 2);
-  canvas.height = Math.max(2, Math.ceil(geometry.region.height * scale / 2) * 2);
+  canvas.width = dimensions?.width ?? Math.max(2, Math.ceil(geometry.region.width / 2) * 2);
+  canvas.height = dimensions?.height ?? Math.max(2, Math.ceil(geometry.region.height / 2) * 2);
   return canvas;
 }
-function annotatedFrame(geometry, scale = 1) {
-  const canvas = canvasFor(geometry, scale), ctx = canvas.getContext('2d');
+function annotatedFrame(geometry, resolution) {
+  const scale = resolution?.scale ?? 1;
+  const canvas = canvasFor(geometry, resolution?.recording), ctx = canvas.getContext('2d');
   cropFrame(ctx, geometry);
   ctx.font = 'bold 14px sans-serif';
   const logical = { width: canvas.width / scale, height: canvas.height / scale };
   const annotations = layoutAnnotations(geometry, logical, text => ctx.measureText(text).width);
-  const output = document.createElement('canvas'); output.width = canvas.width; output.height = annotations.height * scale;
+  const output = document.createElement('canvas'); output.width = canvas.width; output.height = canvas.height + Math.ceil((annotations.height - logical.height) * scale);
   const annotated = output.getContext('2d');
   annotated.fillStyle = '#fff'; annotated.fillRect(0, 0, output.width, output.height);
   annotated.drawImage(canvas, 0, 0);
@@ -44,7 +46,10 @@ async function upload(kind, blob, metadata) {
   if (!response.ok) throw new Error(result.error || 'Could not save capture.');
   return result;
 }
-function status() { return { sessionId, enabled: Boolean(media), tab, recording: Boolean(recording?.started), completed: Boolean(completed), cursor: media?.getVideoTracks()[0]?.getSettings().cursor, warnings }; }
+function status() {
+  const clip = recording ?? completed?.metadata;
+  return { sessionId, enabled: Boolean(media), tab, recording: Boolean(recording?.started), completed: Boolean(completed), cursor: media?.getVideoTracks()[0]?.getSettings().cursor, resolution: clip?.resolution, warnings: clip?.warnings ?? warnings };
+}
 function acceptCursorChunk(state, chunk) {
   if (!state.cursorCoverage || chunk?.captureId !== state.captureId) return;
   state.cursorCoverage.knownOverlay = true;
@@ -107,7 +112,7 @@ async function command(name, args = {}) {
       state.includes.push({ rect, t: (Date.now() - state.started) / 1000 });
       return { sessionId, included: true, recording: true };
     }
-    const snapshot = annotatedFrame(geometry, state.resolution.scale);
+    const snapshot = annotatedFrame(geometry, state.resolution);
     const entry = prepareCallout(state, snapshot.canvas, { target: args.target, label: args.label, geometry, annotations: snapshot.annotations, annotationScale: state.resolution.scale }, args.holdSeconds);
     const blob = await new Promise(resolve => snapshot.canvas.toBlob(resolve, 'image/png'));
     if (!blob) throw new Error('Could not save the callout frame.');
@@ -126,9 +131,9 @@ async function command(name, args = {}) {
   if (name !== 'start') throw new Error(`Unknown command: ${name}`);
   if (recording || completed) throw new Error('Retrieve the previous recording with stop first.');
   const chromeFrame = { width: video.videoWidth, height: video.videoHeight };
-  const scale = recordingScale(args.resolution, chromeFrame, geometry.viewport);
-  const canvas = canvasFor(geometry, scale), ctx = canvas.getContext('2d');
-  const resolution = { requested: args.resolution ?? 'standard', scale, chromeFrame, recording: { width: canvas.width, height: canvas.height } };
+  const resolution = recordingResolution(chromeFrame, geometry.viewport);
+  const { scale } = resolution;
+  const canvas = canvasFor(geometry, resolution.recording), ctx = canvas.getContext('2d');
   const sampleCanvas = document.createElement('canvas'); sampleCanvas.width = 160; sampleCanvas.height = 100;
   const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
   cropFrame(ctx, geometry);
@@ -153,7 +158,10 @@ async function command(name, args = {}) {
     throw error;
   }
   const encoderStartedAt = Date.now();
-  const state = { recordingId: crypto.randomUUID(), resolution, cursorSuppression, cursorProbe, pointerSamples: [], canvas, ctx, stream, recorder, chunks: [], started: scale === 2 ? undefined : encoderStartedAt, geometry, args, events: [], samples: [], callouts: [], includes: [], previous: null, nextSample: 0, warnings: [...warnings] };
+  const state = { recordingId: crypto.randomUUID(), resolution, cursorSuppression, cursorProbe, pointerSamples: [], canvas, ctx, stream, recorder, chunks: [], geometry, args, events: [], samples: [], callouts: [], includes: [], previous: null, nextSample: 0, warnings: [...warnings] };
+  if (scale < resolution.targetScale) {
+    state.warnings.push(`Chrome supplied ${chromeFrame.width} × ${chromeFrame.height} for a ${geometry.viewport.width} × ${geometry.viewport.height} CSS-pixel viewport. Recording at ${canvas.width} × ${canvas.height} (${scale.toFixed(2)}× viewport density, target 2×).`);
+  }
   if (animateCursor) {
     state.captureId = captureId;
     state.cursorCoverage = { source, knownOverlay: cursorSuppression?.supported === true, spans: [] };
@@ -179,8 +187,12 @@ async function command(name, args = {}) {
     throw error;
   }
   state.timer = setInterval(() => {
-    cropFrame(ctx, state.frameGeometry ?? geometry);
+    const source = cropFrame(ctx, state.frameGeometry ?? geometry);
     if (!state.started) return;
+    if (!state.reportedSourceDrop && (source.width + 0.5 < canvas.width || source.height + 0.5 < canvas.height)) {
+      state.reportedSourceDrop = true;
+      state.warnings.push(`Chrome’s available viewport image dropped to ${Math.floor(source.width)} × ${Math.floor(source.height)} during recording. Some frames use fewer source pixels than the ${canvas.width} × ${canvas.height} recording.`);
+    }
     const t = (Date.now() - state.started) / 1000;
     if (t >= state.nextSample) {
       sampleCtx.drawImage(canvas, 0, 0, 160, 100);
@@ -199,20 +211,18 @@ async function command(name, args = {}) {
     }
     if (!state.cursorSuppression && !state.cursorProbe && state.pointer && needsPointerOverlay(source, active)) drawPointer(ctx, state.pointer, geometry, scale);
   }, 1000 / 15);
-  if (scale === 2) {
-    try {
-      await Promise.race([new Promise(resolve => setTimeout(resolve, 1000)), state.done]);
-      if (state.stopping || recorder.state === 'inactive') throw new Error('Recording ended during encoder warm-up.');
-    } catch (error) {
-      await finish();
-      throw error;
-    }
-    state.started = Date.now();
-    state.warmupSeconds = (state.started - encoderStartedAt) / 1000;
-    geometry.tabActive = active;
+  try {
+    await Promise.race([new Promise(resolve => setTimeout(resolve, 1000)), state.done]);
+    if (state.stopping || recorder.state === 'inactive') throw new Error('Recording ended during encoder warm-up.');
+  } catch (error) {
+    await finish();
+    throw error;
   }
+  state.started = Date.now();
+  state.warmupSeconds = (state.started - encoderStartedAt) / 1000;
+  geometry.tabActive = active;
   state.limit = setTimeout(() => finish().catch(error => { warnings.push(error.message); throw error; }), args.maxSeconds * 1000);
-  return { sessionId, recording: true, framing: args.framing, resolution, viewport: geometry.viewport, maxSeconds: args.maxSeconds, preserveTiming: args.preserveTiming, cursorProbe: cursorProbe?.report, cursorSuppression };
+  return { sessionId, recording: true, framing: args.framing, resolution, warnings: state.warnings, viewport: geometry.viewport, maxSeconds: args.maxSeconds, preserveTiming: args.preserveTiming, cursorProbe: cursorProbe?.report, cursorSuppression };
 }
 function finish() {
   const state = recording;

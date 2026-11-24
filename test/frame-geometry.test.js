@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { frameContentRect, sourceCrop, recordingScale } from '../extension/frame-geometry.js';
+import { frameContentRect, sourceCrop, recordingResolution } from '../extension/frame-geometry.js';
 
 test('letterboxed and pillarboxed frames map viewport coordinates into content, not black bars', () => {
   assert.deepEqual(frameContentRect({ width: 1000, height: 800 }, { width: 1000, height: 600 }), { x: 0, y: 100, width: 1000, height: 600, scale: 1 });
@@ -12,10 +12,12 @@ test('matching aspect ratios preserve ordinary crops and invalid frames fail exp
   assert.throws(() => frameContentRect({ width: 0, height: 0 }, { width: 1000, height: 600 }), /positive dimensions/);
 });
 
-test('high resolution uses real 2× content and falls back when Chrome supplies fewer pixels', () => {
-  const viewport = { width: 1448, height: 1559 };
-  const large = { width: 6016, height: 3384 };
-  assert.equal(recordingScale('high', large, viewport), 2);
-  assert.equal(recordingScale('standard', large, viewport), 1);
-  assert.equal(recordingScale('high', { width: 6016, height: 2160 }, viewport), 1);
+test('recording selects all available pixels up to 2× without rounding up', () => {
+  const viewport = { width: 1000, height: 600 };
+  assert.deepEqual(recordingResolution({ width: 6016, height: 3384 }, viewport).recording, { width: 2000, height: 1200 });
+  assert.deepEqual(recordingResolution({ width: 1920, height: 828 }, viewport), {
+    targetScale: 2, scale: 1.38, chromeFrame: { width: 1920, height: 828 }, recording: { width: 1380, height: 828 },
+  });
+  assert.deepEqual(recordingResolution({ width: 1920, height: 829 }, viewport).recording, { width: 1380, height: 828 });
+  assert.deepEqual(recordingResolution({ width: 801, height: 480 }, viewport).recording, { width: 800, height: 480 });
 });

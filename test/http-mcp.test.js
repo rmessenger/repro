@@ -30,7 +30,9 @@ test('HTTP MCP initializes without Chrome and advertises evidence tools and acti
   assert.match(client.getInstructions(), /Load unpacked/);
   const { tools } = await client.listTools();
   assert.equal(tools.length, 8);
-  assert.match(tools.find(t => t.name === 'capture_start').description, /UAT/);
+  const start = tools.find(t => t.name === 'capture_start');
+  assert.match(start.description, /resolution up to 2×/);
+  assert.equal(Object.hasOwn(start.inputSchema.properties, 'resolution'), false);
   const result = await client.callTool({ name: 'capture_status', arguments: {} });
   const status = JSON.parse(result.content[0].text);
   assert.equal(status.ready, false);
@@ -46,6 +48,17 @@ test('HTTP endpoint rejects missing tokens and browser origins', async t => {
   assert.equal((await fetch(`${f.base}/mcp`, { method: 'POST' })).status, 401);
   assert.equal((await fetch(`${f.base}/mcp`, { method: 'POST', headers: { Authorization: `Bearer ${f.token}`, Origin: 'https://example.com' } })).status, 403);
   assert.equal((await fetch(`${f.base}/health`, { headers: { Authorization: `Bearer ${f.token}` } })).status, 200);
+});
+test('recording requires the extension build with automatic resolution', async t => {
+  const f = await fixture(t), client = await f.connect();
+  const extension = new WebSocket(f.base.replace('http:', 'ws:'), { origin: 'chrome-extension://test' });
+  await once(extension, 'open');
+  t.after(() => extension.close());
+  extension.send(JSON.stringify({ type: 'hello', token: f.token, version: '0.12.4', automaticFraming: true, recordsAt2x: true }));
+  extension.on('message', bytes => extension.send(JSON.stringify({ id: JSON.parse(bytes).id, result: { recording: true } })));
+  const result = await client.callTool({ name: 'capture_start', arguments: { tabId: 1, url: 'https://example.com' } });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Reload Repro.*automatic recording resolution/);
 });
 test('two HTTP clients share one extension and an approval wait does not block another client', async t => {
   const f = await fixture(t);
@@ -93,7 +106,7 @@ test('live MCP results direct agents to wait and proceed without chat confirmati
   const extension = new WebSocket(f.base.replace('http:', 'ws:'), { origin: 'chrome-extension://test' });
   await once(extension, 'open');
   t.after(() => extension.close());
-  extension.send(JSON.stringify({ type: 'hello', token: f.token, automaticFraming: true }));
+  extension.send(JSON.stringify({ type: 'hello', token: f.token, automaticFraming: true, automaticResolution: true }));
   const sessionId = crypto.randomUUID(), requestId = crypto.randomUUID();
   const pending = { sessionId, recording: false, approval: { requestId, state: 'awaiting_approval' } };
   const responses = [{ sessionId, requestId, state: 'awaiting_approval' }, pending, pending, { sessionId, recording: true }];

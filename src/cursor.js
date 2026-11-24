@@ -126,7 +126,8 @@ export function cursorAt(plan, t) {
 }
 export const cursorSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="30"><path d="M2 2 L2 21 L7 17 L11 25 L15 23 L11 15 L18 15 Z" fill="#111827" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>';
 
-export const ringSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="896" height="64">${Array.from({ length: 14 }, (_, i) => `<circle cx="${i * 64 + 32}" cy="32" r="${22 + i * 0.6}" fill="none" stroke="#ef233c" stroke-width="2" opacity="${1 - i / 14}"/>`).join('')}</svg>`;
+export const ringPixelSize = scale => Math.max(2, Math.round(32 * scale) * 2);
+export const ringSvg = size => `<svg xmlns="http://www.w3.org/2000/svg" width="${size * 14}" height="${size}" viewBox="0 0 896 64">${Array.from({ length: 14 }, (_, i) => `<circle cx="${i * 64 + 32}" cy="32" r="${22 + i * 0.6}" fill="none" stroke="#ef233c" stroke-width="2" opacity="${1 - i / 14}"/>`).join('')}</svg>`;
 
 function piecewise(pieces, fallback) {
   return pieces.map(({ start, end, value }) => `if(gte(t,${start})*lt(t,${end}),${value},0)`).concat([fallback]).join('+');
@@ -151,13 +152,14 @@ export function cursorExpressions(plan, overlayScale = 1) {
     const visible = plan.visibility ? piecewise(plan.visibility.map(w => ({ ...w, value: 1 })), '0') : '1';
     return `st(0,${expression});if((${visible})*gte(t,${before})*gte(ld(0),0)*lt(ld(0),${limit}),ld(0)-${2 * overlayScale},-100)`;
   };
-  return { x: position('x'), y: position('y'), ...ringExpressions(plan, overlayScale) };
+  return { x: position('x'), y: position('y'), ...ringExpressions(plan, ringPixelSize(overlayScale)) };
 }
-export function ringExpressions(plan, overlayScale = 1) {
+export function ringExpressions(plan, size = 64) {
+  const offscreen = 100 * size / 64;
   const clicks = plan.clicks.map((c, i) => ({ ...c, end: Math.min(c.t + 0.45, plan.clicks[i + 1]?.t ?? Infinity) }));
   const ring = axis => {
     const scale = axis === 'x' ? plan.scaleX : plan.scaleY;
-    return `${-100 * overlayScale}+${piecewise(clicks.map(c => ({ start: c.t, end: c.end, value: (c[axis] - plan.region[axis]) * scale + 68 * overlayScale })), '0')}`;
+    return `${-offscreen}+${piecewise(clicks.map(c => ({ start: c.t, end: c.end, value: (c[axis] - plan.region[axis]) * scale + offscreen - size / 2 })), '0')}`;
   };
-  return { ringX: ring('x'), ringY: ring('y'), ringFrame: piecewise(clicks.map(c => ({ start: c.t, end: c.end, value: `${64 * overlayScale}*min(13,floor((t-${c.t})*30))` })), '0') };
+  return { ringX: ring('x'), ringY: ring('y'), ringFrame: piecewise(clicks.map(c => ({ start: c.t, end: c.end, value: `${size}*min(13,floor((t-${c.t})*30))` })), '0') };
 }

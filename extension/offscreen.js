@@ -55,7 +55,7 @@ async function command(name, args = {}) {
 function connect() {
   const connection = new WebSocket(`ws://127.0.0.1:${settings.port}`);
   socket = connection;
-  connection.onopen = () => connection.send(JSON.stringify({ type: 'hello', token: settings.token, version: settings.extensionVersion, automaticFraming: true }));
+  connection.onopen = () => connection.send(JSON.stringify({ type: 'hello', token: settings.token, version: settings.extensionVersion, automaticFraming: true, automaticResolution: true }));
   connection.onmessage = async event => {
     const message = JSON.parse(event.data);
     if (!message.id) return;

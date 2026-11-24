@@ -200,3 +200,11 @@ test('encoder warm-up is cut while the first interaction and preserveTiming stay
   assert.equal(values.findIndex(value => value > 200), 6);
   assert.ok(values.slice(0, 6).every(value => value < 50));
 });
+
+test('export reports unexpectedly low encoded dimensions alongside actual size', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'repro-resolution-check-'));
+  await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x240:r=15:d=2', '-c:v', 'libvpx-vp9', path.join(directory, 'original.webm')]);
+  const result = await processVideo(directory, { duration: 2, samples: [], events: [], resolution: { scale: 1, recording: { width: 640, height: 480 } } });
+  assert.deepEqual(result.video, { width: 320, height: 240 });
+  assert.match(result.warnings[0], /Chrome encoded 320 × 240.*selected 640 × 480/);
+});

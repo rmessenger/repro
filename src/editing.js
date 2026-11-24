@@ -95,10 +95,10 @@ export function planEditingOverlays(editing, playback, geometry, frame) {
   }
   return merged;
 }
-export function editingSvg(rect, label, frame) {
+export function editingSvg(rect, label, frame, pixelFrame = frame) {
   const x = Math.max(1.5, rect.x - 2), y = Math.max(1.5, rect.y - 2);
   const width = Math.min(frame.width - x - 1.5, rect.width + 4), height = Math.min(frame.height - y - 1.5, rect.height + 4);
   const badgeWidth = label === 'Next: edit' ? 75 : 60;
   const bx = Math.max(0, Math.min(frame.width - badgeWidth, x + width - badgeWidth)), by = y >= 23 ? y - 23 : Math.min(frame.height - 20, y + height + 2);
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${frame.width}" height="${frame.height}"><rect x="${x}" y="${y}" width="${width}" height="${height}" rx="5" fill="none" stroke="#e63046" stroke-width="3"/><rect x="${bx}" y="${by}" width="${badgeWidth}" height="20" rx="4" fill="#be123c"/><text x="${bx + 7}" y="${by + 14}" font-family="sans-serif" font-size="12" fill="white">${label}</text></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${pixelFrame.width}" height="${pixelFrame.height}" viewBox="0 0 ${frame.width} ${frame.height}" preserveAspectRatio="none"><rect x="${x}" y="${y}" width="${width}" height="${height}" rx="5" fill="none" stroke="#e63046" stroke-width="3"/><rect x="${bx}" y="${by}" width="${badgeWidth}" height="20" rx="4" fill="#be123c"/><text x="${bx + 7}" y="${by + 14}" font-family="sans-serif" font-size="12" fill="white">${label}</text></svg>`;
 }

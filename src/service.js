@@ -19,7 +19,7 @@ const installation = {
   agentAction: 'Walk the user through these steps. Do not try to install the extension or approve capture on their behalf. Once connected, retry capture_status, then request a tab through capture_start.',
 };
 const readiness = () => ({ service: 'repro', version, extensionConnected: extension?.readyState === 1, extensionVersion, extensionPath });
-let extensionVersion, automaticFraming;
+let extensionVersion, automaticFraming, automaticResolution;
 let extension;
 const pending = new Map();
 const exports = new Map();
@@ -41,7 +41,8 @@ function command(name, args) {
     if (name === 'status') return result;
     throw new Error(JSON.stringify(result));
   }
-  if (['start', 'include'].includes(name) && !automaticFraming) throw new Error('Reload Repro in chrome://extensions to enable automatic video framing.');
+  if (name === 'start' && !automaticResolution) throw new Error('Reload Repro in chrome://extensions to enable automatic recording resolution.');
+  if (name === 'include' && !automaticFraming) throw new Error('Reload Repro in chrome://extensions to enable automatic video framing.');
   const id = randomUUID();
   const result = new Promise((resolve, reject) => {
     const timer = setTimeout(() => { pending.delete(id); reject(new Error('Capture command timed out; use status to inspect the session.')); }, 180000);
@@ -133,7 +134,7 @@ wss.on('connection', (socket, request) => {
       if (message.type !== 'hello' || !secureEqual(message.token)) { socket.close(1008, 'Unauthorized'); return; }
       authenticated = true; clearTimeout(timer);
       if (extension) { failPending('Capture connection replaced. The command may have executed; inspect session status before retrying.'); extension.close(1000, 'Reconnected'); }
-      extension = socket; extensionVersion = message.version; automaticFraming = message.automaticFraming === true; return;
+      extension = socket; extensionVersion = message.version; automaticFraming = message.automaticFraming === true; automaticResolution = message.automaticResolution === true; return;
     }
     const entry = pending.get(message.id);
     if (!entry) return;
