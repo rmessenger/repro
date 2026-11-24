@@ -131,7 +131,7 @@ export const ringSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="896" heig
 function piecewise(pieces, fallback) {
   return pieces.map(({ start, end, value }) => `if(gte(t,${start})*lt(t,${end}),${value},0)`).concat([fallback]).join('+');
 }
-export function cursorExpressions(plan) {
+export function cursorExpressions(plan, overlayScale = 1) {
   const duration = plan.movements.at(-1).end;
   const position = axis => {
     const scale = axis === 'x' ? plan.scaleX : plan.scaleY;
@@ -149,15 +149,15 @@ export function cursorExpressions(plan) {
     }
     const before = plan.movements[0].end;
     const visible = plan.visibility ? piecewise(plan.visibility.map(w => ({ ...w, value: 1 })), '0') : '1';
-    return `st(0,${expression});if((${visible})*gte(t,${before})*gte(ld(0),0)*lt(ld(0),${limit}),ld(0)-2,-100)`;
+    return `st(0,${expression});if((${visible})*gte(t,${before})*gte(ld(0),0)*lt(ld(0),${limit}),ld(0)-${2 * overlayScale},-100)`;
   };
-  return { x: position('x'), y: position('y'), ...ringExpressions(plan) };
+  return { x: position('x'), y: position('y'), ...ringExpressions(plan, overlayScale) };
 }
-export function ringExpressions(plan) {
+export function ringExpressions(plan, overlayScale = 1) {
   const clicks = plan.clicks.map((c, i) => ({ ...c, end: Math.min(c.t + 0.45, plan.clicks[i + 1]?.t ?? Infinity) }));
   const ring = axis => {
     const scale = axis === 'x' ? plan.scaleX : plan.scaleY;
-    return `-100+${piecewise(clicks.map(c => ({ start: c.t, end: c.end, value: (c[axis] - plan.region[axis]) * scale + 68 })), '0')}`;
+    return `${-100 * overlayScale}+${piecewise(clicks.map(c => ({ start: c.t, end: c.end, value: (c[axis] - plan.region[axis]) * scale + 68 * overlayScale })), '0')}`;
   };
-  return { ringX: ring('x'), ringY: ring('y'), ringFrame: piecewise(clicks.map(c => ({ start: c.t, end: c.end, value: `64*min(13,floor((t-${c.t})*30))` })), '0') };
+  return { ringX: ring('x'), ringY: ring('y'), ringFrame: piecewise(clicks.map(c => ({ start: c.t, end: c.end, value: `${64 * overlayScale}*min(13,floor((t-${c.t})*30))` })), '0') };
 }

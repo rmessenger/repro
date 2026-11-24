@@ -83,7 +83,7 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname === '/upload' && request.method === 'POST') {
       const kind = url.searchParams.get('kind');
       if (!['video', 'screenshot', 'callout'].includes(kind)) throw new Error('Invalid artifact type.');
-      const payload = await body(request, 150 * 1024 * 1024);
+      const payload = await body(request, (kind === 'video' ? 205 : 150) * 1024 * 1024);
       if (payload.length < 4) throw new Error('Invalid capture payload.');
       const metadataLength = payload.readUInt32BE(0);
       if (metadataLength > 1024 * 1024 || metadataLength + 4 >= payload.length) throw new Error('Invalid capture metadata length.');

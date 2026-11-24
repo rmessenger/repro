@@ -1,6 +1,6 @@
 import { beginCursorProbe } from './cursor-probe.js';
 import { prepareCallout } from './callout.js';
-import { sourceCrop, frameContentRect } from './frame-geometry.js';
+import { sourceCrop, frameContentRect, recordingScale } from './frame-geometry.js';
 import { layoutAnnotations, drawAnnotations } from './annotations.js';
 import { drawPointer, needsPointerOverlay } from './pointer.js';
 import { acquireMedia } from './capture-media.js';
@@ -14,22 +14,24 @@ function cropFrame(context, geometry) {
   const r = sourceCrop({ width: video.videoWidth, height: video.videoHeight }, geometry);
   context.drawImage(video, r.x, r.y, r.width, r.height, 0, 0, context.canvas.width, context.canvas.height);
 }
-function canvasFor(geometry) {
+function canvasFor(geometry, scale = 1) {
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(2, Math.ceil(geometry.region.width / 2) * 2);
-  canvas.height = Math.max(2, Math.ceil(geometry.region.height / 2) * 2);
+  canvas.width = Math.max(2, Math.ceil(geometry.region.width * scale / 2) * 2);
+  canvas.height = Math.max(2, Math.ceil(geometry.region.height * scale / 2) * 2);
   return canvas;
 }
-function annotatedFrame(geometry) {
-  const canvas = canvasFor(geometry), ctx = canvas.getContext('2d');
+function annotatedFrame(geometry, scale = 1) {
+  const canvas = canvasFor(geometry, scale), ctx = canvas.getContext('2d');
   cropFrame(ctx, geometry);
   ctx.font = 'bold 14px sans-serif';
-  const annotations = layoutAnnotations(geometry, canvas, text => ctx.measureText(text).width);
-  const output = document.createElement('canvas'); output.width = canvas.width; output.height = annotations.height;
+  const logical = { width: canvas.width / scale, height: canvas.height / scale };
+  const annotations = layoutAnnotations(geometry, logical, text => ctx.measureText(text).width);
+  const output = document.createElement('canvas'); output.width = canvas.width; output.height = annotations.height * scale;
   const annotated = output.getContext('2d');
   annotated.fillStyle = '#fff'; annotated.fillRect(0, 0, output.width, output.height);
   annotated.drawImage(canvas, 0, 0);
-  drawAnnotations(annotated, annotations);
+  annotated.scale(scale, scale);
+  drawAnnotations(annotated, annotations, logical.width);
   const frame = { width: video.videoWidth, height: video.videoHeight };
   return { canvas: output, annotations, capture: { frame, content: frameContentRect(frame, geometry.viewport) } };
 }
@@ -42,7 +44,7 @@ async function upload(kind, blob, metadata) {
   if (!response.ok) throw new Error(result.error || 'Could not save capture.');
   return result;
 }
-function status() { return { sessionId, enabled: Boolean(media), tab, recording: Boolean(recording), completed: Boolean(completed), cursor: media?.getVideoTracks()[0]?.getSettings().cursor, warnings }; }
+function status() { return { sessionId, enabled: Boolean(media), tab, recording: Boolean(recording?.started), completed: Boolean(completed), cursor: media?.getVideoTracks()[0]?.getSettings().cursor, warnings }; }
 function acceptCursorChunk(state, chunk) {
   if (!state.cursorCoverage || chunk?.captureId !== state.captureId) return;
   state.cursorCoverage.knownOverlay = true;
@@ -95,7 +97,7 @@ async function command(name, args = {}) {
   requireMedia();
   if (name === 'include' || name === 'callout') {
     const state = recording;
-    if (!state || state.stopping) throw new Error('Start a recording before marking an element.');
+    if (!state?.started || state.stopping) throw new Error('Start a recording before marking an element.');
     if (name === 'include' && state.includes.length >= 40) throw new Error('A clip can include at most 40 explicitly marked elements.');
     const geometry = await background('resolve', { highlight: [{ target: args.target, label: args.label, style: 'box' }] });
     if (recording !== state || state.stopping) throw new Error('The recording ended while resolving the target.');
@@ -105,8 +107,8 @@ async function command(name, args = {}) {
       state.includes.push({ rect, t: (Date.now() - state.started) / 1000 });
       return { sessionId, included: true, recording: true };
     }
-    const snapshot = annotatedFrame(geometry);
-    const entry = prepareCallout(state, snapshot.canvas, { target: args.target, label: args.label, geometry, annotations: snapshot.annotations }, args.holdSeconds);
+    const snapshot = annotatedFrame(geometry, state.resolution.scale);
+    const entry = prepareCallout(state, snapshot.canvas, { target: args.target, label: args.label, geometry, annotations: snapshot.annotations, annotationScale: state.resolution.scale }, args.holdSeconds);
     const blob = await new Promise(resolve => snapshot.canvas.toBlob(resolve, 'image/png'));
     if (!blob) throw new Error('Could not save the callout frame.');
     if (recording !== state || state.stopping) throw new Error('The recording ended while saving the callout.');
@@ -123,14 +125,17 @@ async function command(name, args = {}) {
   }
   if (name !== 'start') throw new Error(`Unknown command: ${name}`);
   if (recording || completed) throw new Error('Retrieve the previous recording with stop first.');
-  const canvas = canvasFor(geometry), ctx = canvas.getContext('2d');
+  const chromeFrame = { width: video.videoWidth, height: video.videoHeight };
+  const scale = recordingScale(args.resolution, chromeFrame, geometry.viewport);
+  const canvas = canvasFor(geometry, scale), ctx = canvas.getContext('2d');
+  const resolution = { requested: args.resolution ?? 'standard', scale, chromeFrame, recording: { width: canvas.width, height: canvas.height } };
   const sampleCanvas = document.createElement('canvas'); sampleCanvas.width = 160; sampleCanvas.height = 100;
   const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
   cropFrame(ctx, geometry);
   const stream = canvas.captureStream(15);
   const mimeType = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8'].find(type => MediaRecorder.isTypeSupported(type));
   if (!mimeType) throw new Error('WebM recording is unavailable in this browser.');
-  const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 2500000 });
+  const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5000000 });
   const animateCursor = args.animateCursor && !args.cursorOverlayProbe && !args.cursorProbe;
   const captureId = animateCursor ? crypto.randomUUID() : undefined;
   const cursorSuppression = (args.cursorOverlayProbe || animateCursor)
@@ -147,7 +152,8 @@ async function command(name, args = {}) {
     if (cursorSuppression) await background('cursorControl', { operation: 'stop', captureId });
     throw error;
   }
-  const state = { recordingId: crypto.randomUUID(), cursorSuppression, cursorProbe, pointerSamples: [], canvas, ctx, stream, recorder, chunks: [], started: Date.now(), geometry, args, events: [], samples: [], callouts: [], includes: [], previous: null, nextSample: 0, warnings: [...warnings] };
+  const encoderStartedAt = Date.now();
+  const state = { recordingId: crypto.randomUUID(), resolution, cursorSuppression, cursorProbe, pointerSamples: [], canvas, ctx, stream, recorder, chunks: [], started: scale === 2 ? undefined : encoderStartedAt, geometry, args, events: [], samples: [], callouts: [], includes: [], previous: null, nextSample: 0, warnings: [...warnings] };
   if (animateCursor) {
     state.captureId = captureId;
     state.cursorCoverage = { source, knownOverlay: cursorSuppression?.supported === true, spans: [] };
@@ -173,8 +179,9 @@ async function command(name, args = {}) {
     throw error;
   }
   state.timer = setInterval(() => {
-    const t = (Date.now() - state.started) / 1000;
     cropFrame(ctx, state.frameGeometry ?? geometry);
+    if (!state.started) return;
+    const t = (Date.now() - state.started) / 1000;
     if (t >= state.nextSample) {
       sampleCtx.drawImage(canvas, 0, 0, 160, 100);
       const current = sampleCtx.getImageData(0, 0, 160, 100).data;
@@ -185,15 +192,27 @@ async function command(name, args = {}) {
       if (!['pointerdown', 'click'].includes(event.type) || t - event.t < 0 || t - event.t > 0.45) continue;
       const x = (event.x - geometry.region.x) * canvas.width / geometry.region.width;
       const y = (event.y - geometry.region.y) * canvas.height / geometry.region.height;
-      ctx.strokeStyle = '#ef233c'; ctx.lineWidth = 2;
+      ctx.strokeStyle = '#ef233c'; ctx.lineWidth = 2 * scale;
       ctx.globalAlpha = 1 - (t - event.t) / 0.45;
-      ctx.beginPath(); ctx.arc(x, y, 22 + (t - event.t) * 18, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, (22 + (t - event.t) * 18) * scale, 0, Math.PI * 2); ctx.stroke();
       ctx.globalAlpha = 1;
     }
-    if (!state.cursorSuppression && !state.cursorProbe && state.pointer && needsPointerOverlay(source, active)) drawPointer(ctx, state.pointer, geometry);
+    if (!state.cursorSuppression && !state.cursorProbe && state.pointer && needsPointerOverlay(source, active)) drawPointer(ctx, state.pointer, geometry, scale);
   }, 1000 / 15);
+  if (scale === 2) {
+    try {
+      await Promise.race([new Promise(resolve => setTimeout(resolve, 1000)), state.done]);
+      if (state.stopping || recorder.state === 'inactive') throw new Error('Recording ended during encoder warm-up.');
+    } catch (error) {
+      await finish();
+      throw error;
+    }
+    state.started = Date.now();
+    state.warmupSeconds = (state.started - encoderStartedAt) / 1000;
+    geometry.tabActive = active;
+  }
   state.limit = setTimeout(() => finish().catch(error => { warnings.push(error.message); throw error; }), args.maxSeconds * 1000);
-  return { sessionId, recording: true, framing: args.framing, viewport: geometry.viewport, maxSeconds: args.maxSeconds, preserveTiming: args.preserveTiming, cursorProbe: cursorProbe?.report, cursorSuppression };
+  return { sessionId, recording: true, framing: args.framing, resolution, viewport: geometry.viewport, maxSeconds: args.maxSeconds, preserveTiming: args.preserveTiming, cursorProbe: cursorProbe?.report, cursorSuppression };
 }
 function finish() {
   const state = recording;
@@ -204,8 +223,17 @@ async function finishRecording(state) {
   const ended = Date.now();
   clearInterval(state.timer); clearTimeout(state.limit);
   if (state.recorder.state !== 'inactive') state.recorder.stop();
-  await state.done;
-  if (recording !== state) return;
+  try { await state.done; }
+  finally {
+    try { await restoreCapture(state); }
+    finally { recording = null; }
+  }
+  if (!state.started) return;
+  const videoBlob = new Blob(state.chunks, { type: state.recorder.mimeType });
+  const calloutBlobs = state.callouts.map(callout => callout.blob);
+  completed = { blob: new Blob([videoBlob, ...calloutBlobs]), metadata: { recordingId: state.recordingId, resolution: state.resolution, warmupSeconds: state.warmupSeconds, framing: state.args.framing ?? 'auto', viewportChanged: Boolean(state.frameGeometry), videoBytes: videoBlob.size, calloutSizes: calloutBlobs.map(blob => blob.size), includes: state.includes, captureStartedAt: state.started, animateCursor: state.args.animateCursor === true && !state.args.cursorOverlayProbe && !state.args.cursorProbe, cursorSuppression: state.cursorSuppression, cursorCoverage: state.cursorCoverage, cursorProbe: state.cursorProbe?.report, pointerSamples: state.cursorProbe || state.cursorSuppression ? state.pointerSamples : undefined, geometry: state.geometry, duration: (ended - state.started) / 1000, events: state.events, samples: state.samples, callouts: state.callouts.map(({ blob: _, ...callout }) => callout), preserveTiming: state.args.preserveTiming, pointerRendering: state.cursorCoverage ? 'per-interval-at-export' : state.cursorSuppression ? 'source-only-overlay-suppression-probe' : state.cursorProbe ? 'source-only-cursor-suppression-probe' : source === 'display' ? 'reconstructed-from-page-events' : 'native-with-background-fallback', warnings: state.warnings } };
+}
+async function restoreCapture(state) {
   await state.cursorRearm;
   state.stream.getTracks().forEach(track => track.stop());
   await state.cursorProbe?.restore();
@@ -222,10 +250,6 @@ async function finishRecording(state) {
     }
     if (!state.cursorCoverage && !state.cursorSuppression.safeForAnimation && state.cursorSuppression.tracking?.valid !== false) state.warnings.push('Cursor suppression could not be verified throughout this clip; do not add an animated pointer.');
   }
-  const videoBlob = new Blob(state.chunks, { type: state.recorder.mimeType });
-  const calloutBlobs = state.callouts.map(callout => callout.blob);
-  completed = { blob: new Blob([videoBlob, ...calloutBlobs]), metadata: { recordingId: state.recordingId, framing: state.args.framing ?? 'auto', viewportChanged: Boolean(state.frameGeometry), videoBytes: videoBlob.size, calloutSizes: calloutBlobs.map(blob => blob.size), includes: state.includes, captureStartedAt: state.started, animateCursor: state.args.animateCursor === true && !state.args.cursorOverlayProbe && !state.args.cursorProbe, cursorSuppression: state.cursorSuppression, cursorCoverage: state.cursorCoverage, cursorProbe: state.cursorProbe?.report, pointerSamples: state.cursorProbe || state.cursorSuppression ? state.pointerSamples : undefined, geometry: state.geometry, duration: (ended - state.started) / 1000, events: state.events, samples: state.samples, callouts: state.callouts.map(({ blob: _, ...callout }) => callout), preserveTiming: state.args.preserveTiming, pointerRendering: state.cursorCoverage ? 'per-interval-at-export' : state.cursorSuppression ? 'source-only-overlay-suppression-probe' : state.cursorProbe ? 'source-only-cursor-suppression-probe' : source === 'display' ? 'reconstructed-from-page-events' : 'native-with-background-fallback', warnings: state.warnings } };
-  recording = null;
 }
 
 async function receive(message) {
@@ -237,7 +261,7 @@ async function receive(message) {
       if (recording) acceptCursorChunk(recording, message.chunk);
       return;
     }
-    if (message.type === 'tabActivity') { active = message.active; if (recording?.cursorSuppression) recording.events.push({ type: 'tabActivity', active, t: (Date.now() - recording.started) / 1000 }); return; }
+    if (message.type === 'tabActivity') { active = message.active; if (recording?.started && recording.cursorSuppression) recording.events.push({ type: 'tabActivity', active, t: (Date.now() - recording.started) / 1000 }); return; }
     if (message.type === 'event') {
       if (recording && !recording.stopping) {
         const event = { ...message.event, t: (message.event.at - recording.started) / 1000 };
@@ -248,6 +272,7 @@ async function receive(message) {
           }
           return;
         }
+        if (!recording.started || event.t < 0) return;
         if (event.type === 'pointerdown') recording.dragOrigin = event;
         if (event.type === 'pointerup') {
           const origin = recording.dragOrigin;

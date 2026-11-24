@@ -51,7 +51,7 @@ export function layoutAnnotations(geometry, canvas, measure) {
   return { items, height: footer > canvas.height ? footer + gap : canvas.height };
 }
 
-export function drawAnnotations(ctx, layout) {
+export function drawAnnotations(ctx, layout, width = ctx.canvas.width) {
   ctx.save();
   ctx.strokeStyle = '#ef233c'; ctx.fillStyle = '#ef233c'; ctx.lineWidth = 3;
   for (const item of layout.items) {
@@ -77,7 +77,7 @@ export function drawAnnotations(ctx, layout) {
     ctx.fillStyle = '#fff';
     label.lines.forEach((line, i) => ctx.fillText(line, label.x + 6, label.y + 4 + i * lineHeight));
     if (label.footer) {
-      const x = clamp(item.rect.x, 0, Math.max(0, ctx.canvas.width - 24)), y = Math.max(0, item.rect.y - 23);
+      const x = clamp(item.rect.x, 0, Math.max(0, width - 24)), y = Math.max(0, item.rect.y - 23);
       ctx.fillStyle = '#c91232'; ctx.fillRect(x, y, 24, 22);
       ctx.fillStyle = '#fff'; ctx.fillText(String(item.index), x + 5, y + 3);
     }

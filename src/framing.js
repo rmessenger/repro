@@ -52,7 +52,8 @@ export function planFraming(metadata, sourceFrame) {
       if (item.label?.footer) return finish('callout-legend');
       if (!item.label) continue;
       const { x, y, width, height } = item.label;
-      const visible = clip({ x: x / scaleX, y: y / scaleY, width: width / scaleX, height: height / scaleY }, viewport);
+      const scale = callout.annotationScale ?? 1;
+      const visible = clip({ x: x * scale / scaleX, y: y * scale / scaleY, width: width * scale / scaleX, height: height * scale / scaleY }, viewport);
       if (visible) evidence.push(visible);
     }
   }

@@ -27,16 +27,18 @@ test('auto framing covers entire targets and explicit results and ignores mouse 
   assert.equal(planFraming({ ...metadata, viewportChanged: true }, viewport).reason, 'viewport-changed');
 });
 
-test('export frames the actual video and annotated still, removes temporary sources, and tolerates a retried stop', async t => {
+for (const scale of [1, 2]) test(`export frames video and annotations, removes sources, and tolerates retry at ${scale}×`, async t => {
   const workspace = await mkdtemp(path.join(tmpdir(), 'repro-export-framing-'));
   t.after(() => rm(workspace, { force: true, recursive: true }));
   const seed = path.join(workspace, 'fixture.webm');
-  await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=white:s=1000x600:r=15:d=8', '-vf', "drawbox=x=12:y=12:w=220:h=160:color=black:t=fill:enable='lt(mod(t,0.4),0.2)'", '-c:v', 'libvpx-vp9', seed]);
+  const frame = { width: viewport.width * scale, height: viewport.height * scale };
+  await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=c=white:s=${frame.width}x${frame.height}:r=15:d=8`, '-vf', "drawbox=x=12:y=12:w=220:h=160:color=black:t=fill:enable='lt(mod(t,0.4),0.2)'", '-c:v', 'libvpx-vp9', seed]);
   const video = await readFile(seed);
-  const png = await sharp({ create: { ...viewport, channels: 3, background: 'white' } }).composite([{ input: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="600"><rect x="700" y="180" width="160" height="20" fill="red"/></svg>') }]).png().toBuffer();
+  const png = await sharp({ create: { ...frame, channels: 3, background: 'white' } }).composite([{ input: Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${frame.width}" height="${frame.height}" viewBox="0 0 1000 600"><rect x="700" y="180" width="160" height="20" fill="red"/></svg>`) }]).png().toBuffer();
   const bundle = {
-    ...metadata, events: metadata.events.slice(0, 2), duration: 8, recordingId: crypto.randomUUID(), sessionId: crypto.randomUUID(), samples: [],
-    callouts: [{ at: 4.1, holdSeconds: 1, geometry: { ...geometry, highlights: [{ rect: outcome.rect }] }, annotations: { items: [{ label: { x: 700, y: 180, width: 160, height: 20 } }] } }],
+    ...metadata, resolution: { scale }, animateCursor: true, pointerSamples: [click], cursorSuppression: { safeForAnimation: true },
+    events: [...metadata.events.slice(0, 2), { t: 1.15, type: 'keydown', keyLabel: 'Tab' }], duration: 8, recordingId: crypto.randomUUID(), sessionId: crypto.randomUUID(), samples: [],
+    callouts: [{ at: 4.1, holdSeconds: 1, annotationScale: scale, geometry: { ...geometry, highlights: [{ rect: outcome.rect }] }, annotations: { items: [{ label: { x: 700, y: 180, width: 160, height: 20 } }] } }],
     videoBytes: video.length, calloutSizes: [png.length],
   };
   const directory = path.join(workspace, bundle.recordingId);
@@ -48,6 +50,12 @@ test('export frames the actual video and annotated still, removes temporary sour
   assert.throws(() => recordingParts(bundle, video), /payload lengths/);
   const result = await saveRecording(directory, bundle, parts);
   assert.equal(result.framing.reason, 'interaction-bounds');
+  assert.ok(result.framing.region.x >= 460);
+  const cursor = await sharp(path.join(directory, 'cursor.png')).metadata();
+  const rings = await sharp(path.join(directory, 'cursor-rings.png')).metadata();
+  const keyboard = await sharp(path.join(directory, 'keys-1.png')).metadata();
+  const edit = await sharp(path.join(directory, 'editing-1.png')).metadata();
+  assert.deepEqual([cursor.width, rings.height, keyboard.height, edit.width], [24 * scale, 64 * scale, 52 * scale, result.framing.pixels.width]);
   assert.ok(result.omittedSeconds > 1, 'Activity outside the crop does not keep idle footage');
   assert.ok(result.insertedSeconds >= 1);
   assert.equal(result.original, undefined);
@@ -57,7 +65,7 @@ test('export frames the actual video and annotated still, removes temporary sour
   const still = sharp(path.join(directory, 'callout-1.png'));
   const { width, height } = await still.metadata();
   assert.deepEqual({ width, height }, { width: pixels.width, height: pixels.height });
-  const marker = await still.extract({ left: 715 - pixels.x, top: 190 - pixels.y, width: 1, height: 1 }).removeAlpha().raw().toBuffer();
+  const marker = await still.extract({ left: 715 * scale - pixels.x, top: 190 * scale - pixels.y, width: 1, height: 1 }).removeAlpha().raw().toBuffer();
   assert.deepEqual([...marker], [255, 0, 0]);
   assert.deepEqual(await saveRecording(directory, bundle, parts), result);
   await assert.rejects(readFile(raw), { code: 'ENOENT' });

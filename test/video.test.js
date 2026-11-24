@@ -178,3 +178,25 @@ test('cursor export retains both sides of a foreground reload and stays off the 
   assert.ok((await grab(2.4, 160, 120)).every(channel => channel > 220));
   assert.ok((await grab(3.6, 245, 150))[0] < 100);
 });
+
+test('encoder warm-up is cut while the first interaction and preserveTiming stay aligned', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'repro-warmup-'));
+  await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x240:r=15:d=4', '-vf', "drawbox=color=red:t=fill:enable='lt(t,1)',drawbox=color=yellow:t=fill:enable='gte(t,1.2)'", '-c:v', 'libvpx-vp9', path.join(directory, 'original.webm')]);
+  const action = { t: 0.2, type: 'pointerdown', x: 160, y: 120 };
+  const viewport = { width: 320, height: 240 };
+  const result = await processVideo(directory, {
+    duration: 3, warmupSeconds: 1.03, preserveTiming: true, samples: [], events: [action], pointerSamples: [action],
+    animateCursor: true, cursorSuppression: { safeForAnimation: true },
+    framing: 'viewport', geometry: { viewport, region: { x: 0, y: 0, ...viewport } },
+  });
+  const manifest = JSON.parse(await readFile(result.manifest, 'utf8'));
+  assert.equal(manifest.warmupSeconds, 1);
+  assert.equal(result.durationSeconds, 3);
+  assert.equal(result.outputDurationSeconds, 3);
+  assert.equal(result.omittedSeconds, 0);
+  assert.equal(manifest.cursor.clicks[0].t, action.t);
+  const stats = await run('ffmpeg', ['-v', 'error', '-i', result.clip, '-vf', 'crop=20:20:10:10,signalstats,metadata=print:file=-', '-f', 'null', '-']);
+  const values = [...stats.matchAll(/lavfi.signalstats.YAVG=([\d.]+)/g)].map(match => Number(match[1]));
+  assert.equal(values.findIndex(value => value > 200), 6);
+  assert.ok(values.slice(0, 6).every(value => value < 50));
+});

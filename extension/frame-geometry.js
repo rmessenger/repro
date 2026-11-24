@@ -9,3 +9,7 @@ export function sourceCrop(frame, geometry) {
   const content = frameContentRect(frame, geometry.viewport), region = geometry.region;
   return { x: content.x + region.x * content.scale, y: content.y + region.y * content.scale, width: region.width * content.scale, height: region.height * content.scale };
 }
+
+export function recordingScale(requested, frame, viewport) {
+  return requested === 'high' && frameContentRect(frame, viewport).scale >= 2 ? 2 : 1;
+}

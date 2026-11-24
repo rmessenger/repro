@@ -55,7 +55,7 @@ The service still exposes HTTP MCP. Configure the client with the local `/mcp` U
 5. Pass the same `sessionId` to start additional clips or use `capture_screenshot` for annotated static images. The same enabled tab needs no additional approval between clips.
 6. Leave the session enabled between testing sessions. Use `capture_release` with its `sessionId` only when you want to stop sharing or cancel a pending approval.
 
-Repro records the viewport, then chooses a fixed crop around clicks, edits, callouts, and any elements marked with `capture_include`. Mark visible results or context the viewer needs with `capture_include`; it adds no overlay or pause. Use `framing: "viewport"` to export the whole viewport. Avoid resizing during a clip. Missing or ambiguous targets produce errors, and Chrome browser-use accessibility element numbers are not accepted as Repro targets.
+Repro records the viewport, then chooses a fixed crop around clicks, edits, callouts, and any elements marked with `capture_include`. Mark visible results or context the viewer needs with `capture_include`; it adds no overlay or pause. Use `framing: "viewport"` to export the whole viewport. Use `resolution: "high"` to record at twice the pixel density when Chrome supplies enough pixels. The manifest reports the resolution used. At 2×, Repro warms up the encoder for about one second before reporting that recording is ready. That footage is cut during export. Avoid resizing during a clip. Missing or ambiguous targets produce errors, and Chrome browser-use accessibility element numbers are not accepted as Repro targets.
 
 CLI and MCP use exactly the same validation and service:
 
